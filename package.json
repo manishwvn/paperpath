@@ -1,0 +1,33 @@
+{
+  "name": "paperpath",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "node --experimental-strip-types src/server.ts",
+    "build": "vite build frontend --outDir ../dist/frontend",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests frontend"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@pdfme/common": "6.2.4",
+    "@pdfme/generator": "6.2.4",
+    "@pdfme/schemas": "6.2.4",
+    "express": "5.2.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/express": "5.0.6",
+    "@types/node": "24.19.2",
+    "eslint": "10.12.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.2",
+    "vite": "7.3.7"
+  }
+}
