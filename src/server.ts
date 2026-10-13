@@ -218,6 +218,7 @@ app.get('/api/cases/:caseId/exports/:exportId/:form',async(req,res)=>{
 });
 app.use(express.static(fileURLToPath(new URL('../dist/frontend/',import.meta.url)),{dotfiles:'deny'}));
 app.use((error:unknown,_req:Request,res:Response,_next:NextFunction)=>{
+  void _next;
   const code = error instanceof DomainError?error.code:error instanceof z.ZodError?'INVALID_INPUT':'INTERNAL_ERROR';
   const status = /STALE|CONFLICT/.test(code)?409:/NOT_FOUND/.test(code)?404:/PROVIDER|GROQ/.test(code)?503:code==='INTERNAL_ERROR'?500:400;
   res.status(status).json({error:code});
