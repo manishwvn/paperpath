@@ -7,7 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { z } from 'zod';
 import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Store, DomainError, candidateSchema, fields, validatePacket } from './domain.ts';
 import type { Case } from './domain.ts';
@@ -157,10 +157,21 @@ app.get('/api/cases/:caseId',async(req,res)=>{
   const packet = await withMcp(res.locals.owner,client=>call<Case>(client,'get_case',{caseId}));
   res.json(state(packet));
 });
+// Process-local in-flight dedup only; does not survive restart.
+const messageInflight = new Map<string, { fingerprint: string; promise: Promise<Case> }>();
 app.post('/api/cases/:caseId/message',async(req,res)=>{
   const caseId = uuid.parse(req.params.caseId);
   const args = mutation.extend({text:z.string().min(1).max(4000)}).strict().parse(req.body);
-  const packet = await withMcp(res.locals.owner,async client=>{
+  const fingerprint = createHash('sha256').update(JSON.stringify({caseId,expectedRevision:args.expectedRevision,text:args.text})).digest('hex');
+  const inflightKey = `${res.locals.owner}\0${args.idempotencyKey}`;
+  const inflightHit = messageInflight.get(inflightKey);
+  if (inflightHit) {
+    if (inflightHit.fingerprint!==fingerprint) throw new DomainError('IDEMPOTENCY_CONFLICT');
+    const packet = await inflightHit.promise;
+    res.json(state(packet));
+    return;
+  }
+  const task = withMcp(res.locals.owner,async client=>{
     if (store.committedMessage(res.locals.owner,caseId,args.expectedRevision,args.idempotencyKey,args.text)) {
       return call<Case>(client,'get_case',{caseId});
     }
@@ -175,7 +186,14 @@ app.post('/api/cases/:caseId/message',async(req,res)=>{
       idempotencyKey:args.idempotencyKey,sourceText:args.text,candidates});
     return call<Case>(client,'get_case',{caseId});
   });
-  res.json(state(packet));
+  task.catch(()=>{});
+  messageInflight.set(inflightKey,{fingerprint,promise:task});
+  try {
+    const packet = await task;
+    res.json(state(packet));
+  } finally {
+    if (messageInflight.get(inflightKey)?.promise===task) messageInflight.delete(inflightKey);
+  }
 });
 app.post('/api/cases/:caseId/correct',async(req,res)=>{
   const caseId = uuid.parse(req.params.caseId);
