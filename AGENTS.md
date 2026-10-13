@@ -29,6 +29,8 @@ Before substantive work, identify dependencies and independent tasks. Use up to 
 - GPT-6 Luna: bounded searches, evidence collection, mechanical edits, and focused execution, at xhigh or max only.
 - OpenCode/Muse: most bounded implementation after the existing zero-cost and inherited-execution admission gate passes. Use observed quality and repair rate to decide workload; model parity and free access are not assumed.
 
+Current user execution requirement: OpenCode through its actual CLI is mandatory for implementation. Resolve native-client issues before considering a fallback. Only if OpenCode proves unusable may implementation fall back to GPT-6 Luna at xhigh/max. Keep independent audit and review on GPT-6.1 Sol. Minimize Sol orchestration tokens; do not use Sol as an application implementation fallback. Preserve the zero-cost, containment and free-model admission requirements.
+
 Give each helper a small task, minimal context, exact ownership, acceptance criteria, and a stop condition. Use fresh bounded context for explicit model overrides. Tell writers they are not alone and must preserve others' work. Give workers exclusive files or worktrees; root owns shared integration. Do not use a fixed-effort custom role that conflicts with the model policy. Reuse an existing helper for a related follow-up.
 
 Worker receipts contain only changed/inspected paths, decisions or findings, check results, evidence, and blockers. Trust bounded exploration receipts unless contradictory evidence appears. Keep an independent Sol review for release-critical changes; do not spawn multiple reviewers for every small edit.
