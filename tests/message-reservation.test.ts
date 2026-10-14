@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -346,6 +346,242 @@ test('reservation alone leaves case packet exactly unchanged', async () => {
     assert.deepEqual(after.sources, before.sources);
     assert.deepEqual(after.audit, before.audit);
     assert.equal(JSON.stringify(after), beforeJson);
+  } finally {
+    for (const store of stores) store.close();
+    await cleanupOwnedDirectory(directory);
+  }
+});
+
+test('owned reservation completes once and replays the current corrected case after reopen', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'paperpath-reservation-complete-'));
+  const databasePath = join(directory, 'paperpath.sqlite');
+  const stores: Store[] = [];
+  try {
+    const firstStore = new Store(databasePath);
+    stores.push(firstStore);
+    const owner = firstStore.session();
+    const created = firstStore.create(owner, reservationKey());
+    const key = reservationKey();
+    const reserved = firstStore.reserveMessage(owner, created.id, created.revision, key, validSource);
+    assert.equal(reserved.state, 'pending');
+    if (reserved.state !== 'pending') assert.fail('expected pending');
+    assert.equal(reserved.acquired, true);
+    if (reserved.acquired !== true) assert.fail('expected acquired');
+    const attemptToken = reserved.attemptToken;
+    const completed = firstStore.completeMessage(owner, created.id, created.revision, key, validSource, attemptToken, completeCandidates);
+    assert.equal(completed.revision, created.revision + 1);
+    assert.equal(completed.sources.length, 1);
+    const operation = firstStore.db.prepare('SELECT payload_hash,result FROM operations WHERE owner=? AND key=?').get(owner, key);
+    const reservation = firstStore.db.prepare('SELECT fingerprint FROM message_reservations WHERE owner=? AND key=?').get(owner, key);
+    assert.ok(operation);
+    assert.equal(reservation, undefined);
+    const expectedPayloadHash = createHash('sha256').update(JSON.stringify({
+      id:created.id,revision:created.revision,action:'propose',
+      input:{sourceText:validSource,candidates:completeCandidates},
+    })).digest('hex');
+    const reservationFingerprint = createHash('sha256').update(JSON.stringify({
+      id:created.id,revision:created.revision,text:validSource,
+    })).digest('hex');
+    const sourceHash = createHash('sha256').update(validSource).digest('hex');
+    assert.equal(operation.payload_hash, expectedPayloadHash);
+    assert.notEqual(operation.payload_hash, reservationFingerprint);
+    assert.notEqual(operation.payload_hash, sourceHash);
+    const storedResult = JSON.parse(String(operation.result)) as typeof completed;
+    assert.equal(storedResult.sources[0]?.sha256, sourceHash);
+    firstStore.close();
+    stores.splice(stores.indexOf(firstStore), 1);
+
+    const reopened = new Store(databasePath);
+    stores.push(reopened);
+    const corrected = reopened.correct(owner, created.id, completed.revision, reservationKey(), 'name', 'Nora Grey');
+    const replay = reopened.reserveMessage(owner, created.id, created.revision, key, validSource);
+    assert.equal(replay.state, 'completed');
+    if (replay.state !== 'completed') assert.fail('expected completed');
+    assert.deepEqual(replay.packet, corrected);
+    expectDomainError(
+      () => reopened.completeMessage(owner, created.id, created.revision, key, validSource, attemptToken, completeCandidates),
+      'IDEMPOTENCY_CONFLICT',
+    );
+    const operationCount = reopened.db.prepare('SELECT COUNT(*) AS count FROM operations WHERE owner=? AND key=?').get(owner, key);
+    assert.equal(Number(operationCount?.count), 1);
+    assert.equal(reopened.get(owner, created.id).sources.length, 2);
+  } finally {
+    for (const store of stores) store.close();
+    await cleanupOwnedDirectory(directory);
+  }
+});
+
+test('completion rejects mismatched ownership and bindings without changing durable state', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'paperpath-reservation-bindings-'));
+  const databasePath = join(directory, 'paperpath.sqlite');
+  const stores: Store[] = [];
+  try {
+    const store = new Store(databasePath);
+    stores.push(store);
+    const owner = store.session();
+    const created = store.create(owner, reservationKey());
+    const otherCase = store.create(owner, reservationKey());
+    const key = reservationKey();
+    const reserved = store.reserveMessage(owner, created.id, created.revision, key, validSource);
+    assert.equal(reserved.state, 'pending');
+    if (reserved.state !== 'pending') assert.fail('expected pending');
+    assert.equal(reserved.acquired, true);
+    if (reserved.acquired !== true) assert.fail('expected acquired');
+    const otherOwner = store.session();
+    const observer = new Store(databasePath);
+    stores.push(observer);
+    const snapshot = () => JSON.stringify({
+      cases:observer.db.prepare('SELECT id,owner,revision,body FROM cases ORDER BY id').all(),
+      operations:observer.db.prepare('SELECT owner,key,payload_hash,result FROM operations ORDER BY owner,key').all(),
+      reservations:observer.db.prepare('SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token,created_at FROM message_reservations ORDER BY owner,key').all(),
+    });
+    const unchangedConflict = (attempt: () => unknown) => {
+      const before = snapshot();
+      expectDomainError(attempt, 'IDEMPOTENCY_CONFLICT');
+      assert.equal(snapshot(), before);
+    };
+    unchangedConflict(() => store.completeMessage(otherOwner, created.id, created.revision, key, validSource, reserved.attemptToken, completeCandidates));
+    unchangedConflict(() => store.completeMessage(owner, created.id, created.revision, key, validSource, 'wrong-attempt-token', completeCandidates));
+    unchangedConflict(() => store.completeMessage(owner, otherCase.id, created.revision, key, validSource, reserved.attemptToken, completeCandidates));
+    unchangedConflict(() => store.completeMessage(owner, created.id, created.revision + 1, key, validSource, reserved.attemptToken, completeCandidates));
+    unchangedConflict(() => store.completeMessage(owner, created.id, created.revision, key, validSource + ' changed', reserved.attemptToken, completeCandidates));
+
+    const expectedFingerprint = createHash('sha256').update(JSON.stringify({
+      id:created.id,revision:created.revision,text:validSource,
+    })).digest('hex');
+    store.db.prepare('UPDATE message_reservations SET fingerprint=? WHERE owner=? AND key=?')
+      .run('tampered-fingerprint', owner, key);
+    unchangedConflict(() => store.completeMessage(owner, created.id, created.revision, key, validSource, reserved.attemptToken, completeCandidates));
+    store.db.prepare('UPDATE message_reservations SET fingerprint=? WHERE owner=? AND key=?')
+      .run(expectedFingerprint, owner, key);
+    const completed = store.completeMessage(owner, created.id, created.revision, key, validSource, reserved.attemptToken, completeCandidates);
+    assert.equal(completed.sources.length, 1);
+    const operationCount = observer.db.prepare('SELECT COUNT(*) AS count FROM operations WHERE owner=? AND key=?').get(owner, key);
+    assert.equal(Number(operationCount?.count), 1);
+    assert.equal(observer.get(owner, created.id).sources.length, 1);
+  } finally {
+    for (const store of stores) store.close();
+    await cleanupOwnedDirectory(directory);
+  }
+});
+
+test('invalid evidence keeps the reservation and permits completion with the same token', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'paperpath-reservation-evidence-'));
+  const databasePath = join(directory, 'paperpath.sqlite');
+  const stores: Store[] = [];
+  try {
+    const store = new Store(databasePath);
+    stores.push(store);
+    const owner = store.session();
+    const created = store.create(owner, reservationKey());
+    const key = reservationKey();
+    const reserved = store.reserveMessage(owner, created.id, created.revision, key, validSource);
+    assert.equal(reserved.state, 'pending');
+    if (reserved.state !== 'pending') assert.fail('expected pending');
+    assert.equal(reserved.acquired, true);
+    if (reserved.acquired !== true) assert.fail('expected acquired');
+    const observer = new Store(databasePath);
+    stores.push(observer);
+    const snapshot = () => JSON.stringify({
+      case:observer.db.prepare('SELECT revision,body FROM cases WHERE id=? AND owner=?').get(created.id, owner),
+      operation:observer.db.prepare('SELECT payload_hash,result FROM operations WHERE owner=? AND key=?').get(owner, key),
+      reservation:observer.db.prepare('SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token FROM message_reservations WHERE owner=? AND key=?').get(owner, key),
+    });
+    const before = snapshot();
+    expectDomainError(
+      () => store.completeMessage(owner, created.id, created.revision, key, validSource, reserved.attemptToken, [
+        { field:'name',value:'Nora Patel',quote:'This quote is absent from the source.' },
+      ]),
+      'UNSUPPORTED_EVIDENCE',
+    );
+    assert.equal(snapshot(), before);
+    const completed = store.completeMessage(owner, created.id, created.revision, key, validSource, reserved.attemptToken, completeCandidates);
+    assert.equal(completed.revision, created.revision + 1);
+    assert.equal(completed.sources.length, 1);
+    assert.equal(snapshot().includes('"reservation":undefined'), false);
+    const operationCount = observer.db.prepare('SELECT COUNT(*) AS count FROM operations WHERE owner=? AND key=?').get(owner, key);
+    assert.equal(Number(operationCount?.count), 1);
+  } finally {
+    for (const store of stores) store.close();
+    await cleanupOwnedDirectory(directory);
+  }
+});
+
+
+test('stale owned case revision leaves the reservation unchanged', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'paperpath-reservation-stale-'));
+  const databasePath = join(directory, 'paperpath.sqlite');
+  const stores: Store[] = [];
+  try {
+    const store = new Store(databasePath);
+    stores.push(store);
+    const owner = store.session();
+    const created = store.create(owner, reservationKey());
+    const key = reservationKey();
+    const reserved = store.reserveMessage(owner, created.id, created.revision, key, validSource);
+    assert.equal(reserved.state, 'pending');
+    if (reserved.state !== 'pending') assert.fail('expected pending');
+    assert.equal(reserved.acquired, true);
+    if (reserved.acquired !== true) assert.fail('expected acquired');
+    const observer = new Store(databasePath);
+    stores.push(observer);
+    store.correct(owner, created.id, created.revision, reservationKey(), 'name', 'Nora Grey');
+    const snapshot = () => JSON.stringify({
+      cases:observer.db.prepare('SELECT id,owner,revision,body FROM cases ORDER BY id').all(),
+      operations:observer.db.prepare('SELECT owner,key,payload_hash,result FROM operations ORDER BY owner,key').all(),
+      reservations:observer.db.prepare('SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token FROM message_reservations ORDER BY owner,key').all(),
+    });
+    const before = snapshot();
+    expectDomainError(
+      () => store.completeMessage(owner, created.id, created.revision, key, validSource, reserved.attemptToken, completeCandidates),
+      'STALE_REVISION',
+    );
+    assert.equal(snapshot(), before);
+  } finally {
+    for (const store of stores) store.close();
+    await cleanupOwnedDirectory(directory);
+  }
+});
+
+test('reservation deletion failure rolls back completion and retains the token reservation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'paperpath-reservation-delete-abort-'));
+  const databasePath = join(directory, 'paperpath.sqlite');
+  const stores: Store[] = [];
+  try {
+    const store = new Store(databasePath);
+    stores.push(store);
+    const owner = store.session();
+    const created = store.create(owner, reservationKey());
+    const key = reservationKey();
+    const reserved = store.reserveMessage(owner, created.id, created.revision, key, validSource);
+    assert.equal(reserved.state, 'pending');
+    if (reserved.state !== 'pending') assert.fail('expected pending');
+    assert.equal(reserved.acquired, true);
+    if (reserved.acquired !== true) assert.fail('expected acquired');
+    const observer = new Store(databasePath);
+    stores.push(observer);
+    store.db.exec(
+      "CREATE TRIGGER reservation_delete_abort_test BEFORE DELETE ON message_reservations BEGIN SELECT RAISE(ABORT, 'test reservation delete blocked'); END;",
+    );
+    const snapshot = () => JSON.stringify({
+      case:observer.db.prepare('SELECT revision,body FROM cases WHERE id=? AND owner=?').get(created.id, owner),
+      operation:observer.db.prepare('SELECT payload_hash,result FROM operations WHERE owner=? AND key=?').get(owner, key),
+      reservation:observer.db.prepare('SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token FROM message_reservations WHERE owner=? AND key=?').get(owner, key),
+    });
+    const before = snapshot();
+    assert.throws(
+      () => store.completeMessage(owner, created.id, created.revision, key, validSource, reserved.attemptToken, completeCandidates),
+      /test reservation delete blocked/,
+    );
+    assert.equal(snapshot(), before);
+    store.db.exec('DROP TRIGGER reservation_delete_abort_test');
+    const completed = store.completeMessage(owner, created.id, created.revision, key, validSource, reserved.attemptToken, completeCandidates);
+    assert.equal(completed.revision, created.revision + 1);
+    assert.equal(completed.sources.length, 1);
+    const operationCount = observer.db.prepare('SELECT COUNT(*) AS count FROM operations WHERE owner=? AND key=?').get(owner, key);
+    assert.equal(Number(operationCount?.count), 1);
+    const remainingReservation = observer.db.prepare('SELECT 1 FROM message_reservations WHERE owner=? AND key=?').get(owner, key);
+    assert.equal(remainingReservation, undefined);
   } finally {
     for (const store of stores) store.close();
     await cleanupOwnedDirectory(directory);

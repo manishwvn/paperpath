@@ -242,27 +242,76 @@ export class Store {
       return packet;
     });
   }
-  propose(owner: string, id: string, revision: number, key: string, sourceText: string, candidates: Candidate[]): Case {
+  private prepareProposal(sourceText: string, candidates: Candidate[]) {
     if (!sourceText.trim() || sourceText.length > 4000 || candidates.length > fields.length) throw new DomainError('INVALID_SOURCE');
     const parsed = z.array(candidateSchema).parse(candidates);
     if (new Set(parsed.map(item => item.field)).size !== parsed.length) throw new DomainError('DUPLICATE_FIELD');
     const source: Source = { id:randomUUID(), text:sourceText, sha256:hash(sourceText), createdAt:new Date().toISOString() };
     const validated = parsed.map(candidate => ({ candidate, evidence: evidenceFor(source,candidate) }));
-    return this.update(owner,id,revision,key,{ sourceText,candidates:parsed },'propose',packet => {
-      packet.sources.push(source);
-      const changed: Field[] = [];
-      for (const { candidate, evidence } of validated) {
-        const current = packet.facts[candidate.field];
-        if (!current) {
-          packet.facts[candidate.field] = { value:candidate.value, evidence, conflicts:[] };
-          changed.push(candidate.field);
-        } else if (current.value !== candidate.value && !current.conflicts.some(item => item.value === candidate.value)) {
-          current.conflicts.push({ value:candidate.value, evidence });
-          changed.push(candidate.field);
-        }
+    return { source, parsed, validated };
+  }
+  private applyProposal(packet: Case, source: Source, validated: Array<{ candidate: Candidate; evidence: Evidence }>): Field[] {
+    packet.sources.push(source);
+    const changed: Field[] = [];
+    for (const { candidate, evidence } of validated) {
+      const current = packet.facts[candidate.field];
+      if (!current) {
+        packet.facts[candidate.field] = { value:candidate.value, evidence, conflicts:[] };
+        changed.push(candidate.field);
+      } else if (current.value !== candidate.value && !current.conflicts.some(item => item.value === candidate.value)) {
+        current.conflicts.push({ value:candidate.value, evidence });
+        changed.push(candidate.field);
       }
-      return changed;
-    });
+    }
+    return changed;
+  }
+  propose(owner: string, id: string, revision: number, key: string, sourceText: string, candidates: Candidate[]): Case {
+    const prepared = this.prepareProposal(sourceText,candidates);
+    return this.update(owner,id,revision,key,{ sourceText,candidates:prepared.parsed },'propose',packet =>
+      this.applyProposal(packet,prepared.source,prepared.validated));
+  }
+  completeMessage(owner: string, caseId: string, expectedRevision: number, key: string, text: string,
+    attemptToken: string, candidates: Candidate[]): Case {
+    if (!this.sessionExists(owner)) throw new DomainError('SESSION_NOT_FOUND');
+    if (!/^[a-zA-Z0-9_-]{8,100}$/.test(key)) throw new DomainError('INVALID_IDEMPOTENCY_KEY');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const prior = this.db.prepare('SELECT 1 FROM operations WHERE owner=? AND key=?').get(owner,key);
+      if (prior) throw new DomainError('IDEMPOTENCY_CONFLICT');
+      const reservation = this.db.prepare('SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token FROM message_reservations WHERE owner=? AND key=?').get(owner,key);
+      const fingerprint = hash(JSON.stringify({ id:caseId,revision:expectedRevision,text }));
+      if (!reservation || String(reservation.owner) !== owner || String(reservation.key) !== key ||
+        String(reservation.case_id) !== caseId || Number(reservation.expected_revision) !== expectedRevision ||
+        String(reservation.source_text) !== text || String(reservation.fingerprint) !== fingerprint ||
+        String(reservation.attempt_token) !== attemptToken) {
+        throw new DomainError('IDEMPOTENCY_CONFLICT');
+      }
+      const packet = this.get(owner,caseId);
+      if (packet.revision !== expectedRevision) throw new DomainError('STALE_REVISION');
+      const prepared = this.prepareProposal(text,candidates);
+      const payloadHash = hash(JSON.stringify({
+        id:caseId,revision:expectedRevision,action:'propose',
+        input:{sourceText:text,candidates:prepared.parsed},
+      }));
+      const changed = this.applyProposal(packet,prepared.source,prepared.validated);
+      packet.revision += 1;
+      packet.updatedAt = new Date().toISOString();
+      packet.confirmedRevision = null;
+      packet.audit.push({ revision:packet.revision,action:'propose',at:packet.updatedAt,changed });
+      const saved = this.db.prepare('UPDATE cases SET revision=?,body=? WHERE id=? AND owner=? AND revision=?')
+        .run(packet.revision,JSON.stringify(packet),caseId,owner,expectedRevision);
+      if (saved.changes !== 1) throw new DomainError('STALE_REVISION');
+      this.db.prepare('INSERT INTO operations VALUES (?,?,?,?)')
+        .run(owner,key,payloadHash,JSON.stringify(packet));
+      const deleted = this.db.prepare('DELETE FROM message_reservations WHERE owner=? AND key=? AND case_id=? AND expected_revision=? AND source_text=? AND fingerprint=? AND attempt_token=?')
+        .run(owner,key,caseId,expectedRevision,text,fingerprint,attemptToken);
+      if (deleted.changes !== 1) throw new DomainError('IDEMPOTENCY_CONFLICT');
+      this.db.exec('COMMIT');
+      return packet;
+    } catch (error) {
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   correct(owner: string, id: string, revision: number, key: string, field: Field, value: Value): Case {
     if (!fields.includes(field)) throw new DomainError('INVALID_FIELD');
