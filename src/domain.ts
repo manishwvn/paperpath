@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 export const fields = ['name', 'email', 'availability', 'equipment', 'motivation'] as const;
@@ -21,6 +21,10 @@ export type Case = {
   sources: Source[]; audit: Audit[];
 };
 export type Validation = { complete: boolean; missing: Field[]; conflicts: Field[] };
+export type ReserveAcquired = { state: 'pending'; acquired: true; attemptToken: string };
+export type ReservePending = { state: 'pending'; acquired: false };
+export type ReserveCompleted = { state: 'completed'; packet: Case };
+export type ReserveResult = ReserveAcquired | ReservePending | ReserveCompleted;
 
 export class DomainError extends Error {
   code: string;
@@ -92,6 +96,13 @@ export class Store {
         id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id),
         revision INTEGER NOT NULL, manifest TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS message_reservations (
+        owner TEXT NOT NULL REFERENCES sessions(id), key TEXT NOT NULL,
+        case_id TEXT NOT NULL, expected_revision INTEGER NOT NULL,
+        source_text TEXT NOT NULL, fingerprint TEXT NOT NULL,
+        attempt_token TEXT NOT NULL, created_at TEXT NOT NULL,
+        PRIMARY KEY(owner,key)
+      );
     `);
   }
   close() { this.db.close(); }
@@ -127,6 +138,52 @@ export class Store {
     if (prior.payload_hash !== hash(JSON.stringify({id,revision,action:'export'}))) throw new DomainError('IDEMPOTENCY_CONFLICT');
     return JSON.parse(String(prior.result)) as Record<string,unknown>;
   }
+  reserveMessage(owner: string, caseId: string, expectedRevision: number, key: string, text: string): ReserveResult {
+    if (!this.sessionExists(owner)) throw new DomainError('SESSION_NOT_FOUND');
+    if (!/^[a-zA-Z0-9_-]{8,100}$/.test(key)) throw new DomainError('INVALID_IDEMPOTENCY_KEY');
+    if (!text.trim() || text.length > 4000) throw new DomainError('INVALID_SOURCE');
+    const fingerprint = hash(JSON.stringify({ id: caseId, revision: expectedRevision, text }));
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const prior = this.db.prepare('SELECT payload_hash,result FROM operations WHERE owner=? AND key=?').get(owner,key);
+      if (prior) {
+        let raw: unknown;
+        try {
+          raw = JSON.parse(String(prior.result));
+        } catch {
+          throw new DomainError('IDEMPOTENCY_CONFLICT');
+        }
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        const packet = raw as { id: unknown; revision: unknown; audit: unknown; sources: unknown };
+        if (packet.id !== caseId || packet.revision !== expectedRevision + 1) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        if (!Array.isArray(packet.audit) || !Array.isArray(packet.sources)) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        const lastAudit: unknown = packet.audit.at(-1);
+        const lastSource: unknown = packet.sources.at(-1);
+        if (typeof lastAudit !== 'object' || lastAudit === null || Array.isArray(lastAudit)) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        if (typeof lastSource !== 'object' || lastSource === null || Array.isArray(lastSource)) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        if ((lastAudit as { action: unknown }).action !== 'propose' || (lastSource as { text: unknown }).text !== text) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        const current = this.get(owner, caseId);
+        this.db.exec('COMMIT');
+        return { state: 'completed', packet: current };
+      }
+      const existing = this.db.prepare('SELECT case_id,expected_revision,source_text,fingerprint FROM message_reservations WHERE owner=? AND key=?').get(owner,key);
+      if (existing) {
+        if (String(existing.case_id) !== caseId || Number(existing.expected_revision) !== expectedRevision || String(existing.source_text) !== text || String(existing.fingerprint) !== fingerprint) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        this.db.exec('COMMIT');
+        return { state: 'pending', acquired: false };
+      }
+      const current = this.get(owner, caseId);
+      if (current.revision !== expectedRevision) throw new DomainError('STALE_REVISION');
+      const attemptToken = randomBytes(16).toString('hex');
+      const createdAt = new Date().toISOString();
+      this.db.prepare('INSERT INTO message_reservations VALUES (?,?,?,?,?,?,?,?)').run(owner,key,caseId,expectedRevision,text,fingerprint,attemptToken,createdAt);
+      this.db.exec('COMMIT');
+      return { state: 'pending', acquired: true, attemptToken };
+    } catch (error) {
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
   private transaction<T>(owner: string, key: string, input: unknown, operation: () => T): T {
     if (!this.sessionExists(owner)) throw new DomainError('SESSION_NOT_FOUND');
     if (!/^[a-zA-Z0-9_-]{8,100}$/.test(key)) throw new DomainError('INVALID_IDEMPOTENCY_KEY');
@@ -139,6 +196,8 @@ export class Store {
         this.db.exec('COMMIT');
         return JSON.parse(String(prior.result)) as T;
       }
+      const reserved = this.db.prepare('SELECT 1 FROM message_reservations WHERE owner=? AND key=?').get(owner,key);
+      if (reserved) throw new DomainError('IDEMPOTENCY_CONFLICT');
       const result = operation();
       this.db.prepare('INSERT INTO operations VALUES (?,?,?,?)').run(owner,key,payloadHash,JSON.stringify(result));
       this.db.exec('COMMIT');
