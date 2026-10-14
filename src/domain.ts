@@ -126,8 +126,15 @@ export class Store {
     const prior = this.db.prepare('SELECT result FROM operations WHERE owner=? AND key=?').get(owner,key);
     if (!prior) return undefined;
     const packet = JSON.parse(String(prior.result)) as Case;
-    if (packet.id !== id || packet.revision !== revision + 1 || packet.audit?.at(-1)?.action !== 'propose' ||
-      packet.sources?.at(-1)?.text !== text) throw new DomainError('IDEMPOTENCY_CONFLICT');
+    if (packet.id !== id || packet.revision !== revision + 1 || packet.audit?.at(-1)?.action !== 'propose') {
+      throw new DomainError('IDEMPOTENCY_CONFLICT');
+    }
+    const lastSource = Array.isArray(packet.sources) ? packet.sources.at(-1) : undefined;
+    if (typeof lastSource !== 'object' || lastSource === null || Array.isArray(lastSource) ||
+      typeof lastSource.text !== 'string' || lastSource.text !== text ||
+      typeof lastSource.sha256 !== 'string' || lastSource.sha256 !== hash(text)) {
+      throw new DomainError('IDEMPOTENCY_CONFLICT');
+    }
     return this.get(owner,id);
   }
   cachedExport(owner: string, id: string, revision: number, key: string): Record<string,unknown> | undefined {
@@ -161,7 +168,10 @@ export class Store {
         const lastSource: unknown = packet.sources.at(-1);
         if (typeof lastAudit !== 'object' || lastAudit === null || Array.isArray(lastAudit)) throw new DomainError('IDEMPOTENCY_CONFLICT');
         if (typeof lastSource !== 'object' || lastSource === null || Array.isArray(lastSource)) throw new DomainError('IDEMPOTENCY_CONFLICT');
-        if ((lastAudit as { action: unknown }).action !== 'propose' || (lastSource as { text: unknown }).text !== text) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        const source = lastSource as { text: unknown; sha256: unknown };
+        if ((lastAudit as { action: unknown }).action !== 'propose' ||
+          typeof source.text !== 'string' || source.text !== text ||
+          typeof source.sha256 !== 'string' || source.sha256 !== hash(text)) throw new DomainError('IDEMPOTENCY_CONFLICT');
         const current = this.get(owner, caseId);
         this.db.exec('COMMIT');
         return { state: 'completed', packet: current };

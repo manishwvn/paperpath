@@ -218,6 +218,25 @@ test('completed operation replay returns current corrected case before revision 
     assert.deepEqual(replayed.packet, corrected);
     assert.deepEqual(replayed.packet, store.get(owner, created.id));
     assert.equal(replayed.packet.revision, corrected.revision);
+    const operationBefore = store.db.prepare('SELECT payload_hash, result FROM operations WHERE owner=? AND key=?').get(owner, proposeKey);
+    const caseBefore = store.db.prepare('SELECT body FROM cases WHERE id=? AND owner=?').get(created.id, owner);
+    const reservationSql = 'SELECT owner, key, case_id, expected_revision, source_text, fingerprint, attempt_token, created_at FROM message_reservations WHERE owner=? ORDER BY key';
+    const reservationsBefore = JSON.stringify(store.db.prepare(reservationSql).all(owner));
+    assert.ok(operationBefore);
+    assert.ok(caseBefore);
+    const corrupted = JSON.parse(String(operationBefore.result)) as { sources: Array<{ sha256: string }> };
+    const lastSource = corrupted.sources.at(-1);
+    assert.ok(lastSource);
+    lastSource.sha256 = 'corrupted-sha256';
+    store.db.prepare('UPDATE operations SET result=? WHERE owner=? AND key=?').run(JSON.stringify(corrupted), owner, proposeKey);
+    expectDomainError(() => store.reserveMessage(owner, created.id, created.revision, proposeKey, validSource), 'IDEMPOTENCY_CONFLICT');
+    const operationAfter = store.db.prepare('SELECT payload_hash FROM operations WHERE owner=? AND key=?').get(owner, proposeKey);
+    const caseAfter = store.db.prepare('SELECT body FROM cases WHERE id=? AND owner=?').get(created.id, owner);
+    assert.ok(operationAfter);
+    assert.ok(caseAfter);
+    assert.equal(operationAfter.payload_hash, operationBefore.payload_hash);
+    assert.equal(caseAfter.body, caseBefore.body);
+    assert.equal(JSON.stringify(store.db.prepare(reservationSql).all(owner)), reservationsBefore);
   } finally {
     for (const store of stores) store.close();
     await cleanupOwnedDirectory(directory);
