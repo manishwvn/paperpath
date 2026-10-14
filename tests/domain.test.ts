@@ -303,6 +303,22 @@ test('committed message recovery returns current state and rejects changed reque
     assert.equal(store.get(owner, caseId).sources.length, 2);
     expectDomainError(() => store.committedMessage(owner, caseId, 1, key, 'Different input'), 'IDEMPOTENCY_CONFLICT');
     expectDomainError(() => store.committedMessage(owner, caseId, 2, key, completeSource), 'IDEMPOTENCY_CONFLICT');
+    const operationBefore = store.db.prepare('SELECT payload_hash, result FROM operations WHERE owner=? AND key=?').get(owner, key);
+    const caseBefore = store.db.prepare('SELECT body FROM cases WHERE id=? AND owner=?').get(caseId, owner);
+    assert.ok(operationBefore);
+    assert.ok(caseBefore);
+    const corrupted = JSON.parse(String(operationBefore.result)) as { sources: Array<{ sha256: string }> };
+    const lastSource = corrupted.sources.at(-1);
+    assert.ok(lastSource);
+    lastSource.sha256 = 'corrupted-sha256';
+    store.db.prepare('UPDATE operations SET result=? WHERE owner=? AND key=?').run(JSON.stringify(corrupted), owner, key);
+    expectDomainError(() => store.committedMessage(owner, caseId, 1, key, completeSource), 'IDEMPOTENCY_CONFLICT');
+    const operationAfter = store.db.prepare('SELECT payload_hash FROM operations WHERE owner=? AND key=?').get(owner, key);
+    const caseAfter = store.db.prepare('SELECT body FROM cases WHERE id=? AND owner=?').get(caseId, owner);
+    assert.ok(operationAfter);
+    assert.ok(caseAfter);
+    assert.equal(operationAfter.payload_hash, operationBefore.payload_hash);
+    assert.equal(caseAfter.body, caseBefore.body);
   });
 });
 
