@@ -1,13 +1,17 @@
 /* global AbortSignal, Buffer, URL, clearTimeout, console, fetch, process, setTimeout */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile, unlink, rmdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, unlink, rmdir } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Store } from '../../src/domain.ts';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const timeoutMs = 8000;
@@ -24,6 +28,7 @@ let preloadDir;
 let preloadPath;
 let base;
 let mockBase;
+let adapterCleanupAction;
 let cleanupTask;
 
 function listen(server) {
@@ -113,6 +118,7 @@ function cleanup() {
       const cleanupErrors = [];
       let childStopped = false;
       try { await stopChild(); childStopped = true; } catch (error) { cleanupErrors.push(error); }
+      try { if (adapterCleanupAction) await adapterCleanupAction(); } catch (error) { cleanupErrors.push(error); }
       try { await closeServer(mock); } catch (error) { cleanupErrors.push(error); }
       if (childStopped && dataDir) {
         try { await removeKnown(dataDir, ['service-secret.txt', 'paperpath.sqlite', 'paperpath.sqlite-journal', 'paperpath.sqlite-wal', 'paperpath.sqlite-shm', 'mcp-events.jsonl']); }
@@ -172,6 +178,354 @@ function assertPacketEvidence(result, expectedText) {
   assert.equal(source.text, expectedText);
   return { packet, evidence, source };
 }
+
+async function verifyAdapterCompletion() {
+  const syntheticSecret = 'a'.repeat(64);
+  const priorProviderCalls = providerCalls;
+  let adapterDataDir;
+  let adapterPreloadDir;
+  let adapterPreloadPath;
+  let adapterChild;
+  let adapterChildExit;
+  let seedStore;
+  let snapshotDb;
+  let adapterCleanupPromise;
+
+  async function stopOwnedChild() {
+    if (!adapterChild) return true;
+    if (!adapterChildExit) throw new Error('adapter-child-exit-untracked; preserve-test-data');
+    if (adapterChild.exitCode !== null || adapterChild.signalCode !== null) return true;
+    adapterChild.kill('SIGTERM');
+    let timer;
+    const graceful = await Promise.race([
+      adapterChildExit.then(() => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), 3000); })
+    ]);
+    clearTimeout(timer);
+    if (graceful) return true;
+    adapterChild.kill('SIGKILL');
+    let killTimer;
+    const exited = await Promise.race([
+      adapterChildExit.then(() => true),
+      new Promise(resolve => { killTimer = setTimeout(() => resolve(false), 3000); })
+    ]);
+    clearTimeout(killTimer);
+    if (!exited) throw new Error('adapter-child-exit-timeout; preserve-test-data');
+    return true;
+  }
+
+  async function removeAdapterFiles(dir) {
+    for (const name of ['service-secret.txt', 'paperpath.sqlite', 'paperpath.sqlite-journal',
+      'paperpath.sqlite-wal', 'paperpath.sqlite-shm', 'mcp-events.jsonl']) {
+      const file = path.join(dir, name);
+      try { await unlink(file); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    const exportsDir = path.join(dir, 'exports');
+    try {
+      await rmdir(exportsDir);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    await rmdir(dir);
+  }
+
+  function cleanupAdapter() {
+    if (!adapterCleanupPromise) {
+      adapterCleanupPromise = (async () => {
+        const cleanupErrors = [];
+        let storesClosed = true;
+        try {
+          if (snapshotDb) { snapshotDb.close(); snapshotDb = null; }
+        } catch (error) { storesClosed = false; cleanupErrors.push(error); }
+        try {
+          if (seedStore) { seedStore.close(); seedStore = null; }
+        } catch (error) { storesClosed = false; cleanupErrors.push(error); }
+
+        let childStopped = false;
+        try { childStopped = await stopOwnedChild(); }
+        catch (error) { cleanupErrors.push(error); }
+
+        if (childStopped && storesClosed && cleanupErrors.length === 0) {
+          if (adapterDataDir) {
+            try { await removeAdapterFiles(adapterDataDir); }
+            catch (error) { cleanupErrors.push(error); }
+          }
+          if (adapterPreloadPath) {
+            try { await unlink(adapterPreloadPath); }
+            catch (error) { if (error.code !== 'ENOENT') cleanupErrors.push(error); }
+          }
+          if (adapterPreloadDir) {
+            try { await rmdir(adapterPreloadDir); }
+            catch (error) { if (error.code !== 'ENOENT') cleanupErrors.push(error); }
+          }
+        }
+        if (cleanupErrors.length) {
+          process.exitCode = 1;
+          console.error('adapter proof cleanup failed; preserve test data');
+          return false;
+        }
+        return true;
+      })();
+    }
+    return adapterCleanupPromise;
+  }
+  adapterCleanupAction = cleanupAdapter;
+
+  try {
+    adapterDataDir = await mkdtemp(path.join(os.tmpdir(), 'paperpath-mcp-adapter-data-'));
+    adapterPreloadDir = await mkdtemp(path.join(os.tmpdir(), 'paperpath-mcp-adapter-preload-'));
+    adapterPreloadPath = path.join(adapterPreloadDir, 'loopback-fetch.mjs');
+
+    const secretPath = path.join(adapterDataDir, 'service-secret.txt');
+    await writeFile(secretPath, syntheticSecret, { flag: 'wx', mode: 0o600 });
+
+    const portProbe = net.createServer();
+    const adapterPort = await listen(portProbe);
+    await closeServer(portProbe);
+    const adapterBase = 'http://127.0.0.1:' + adapterPort;
+    const preload = 'const appBase=' + JSON.stringify(adapterBase) +
+      '; const nativeFetch=globalThis.fetch;' +
+      ' globalThis.fetch=async(input,init={})=>{' +
+      ' const u=typeof input===\'string\'?new URL(input):input instanceof URL?input:new URL(input.url);' +
+      ' if(u.origin!==appBase||u.hostname!==\'127.0.0.1\')throw new Error(\'adapter-network-guard-rejected\');' +
+      ' const response=await nativeFetch(input,{...init,redirect:\'manual\'});' +
+      ' if(response.status>=300&&response.status<400)throw new Error(\'adapter-redirect-rejected\');' +
+      ' return response};';
+    await writeFile(adapterPreloadPath, preload, { flag: 'wx', mode: 0o600 });
+
+    adapterChild = spawn(process.execPath, ['--import', adapterPreloadPath,
+      '--experimental-strip-types', 'src/server.ts'], {
+      cwd: appRoot,
+      env: {
+        PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8',
+        HOME: adapterDataDir, TMPDIR: adapterDataDir,
+        PORT: String(adapterPort), PAPERPATH_DATA_DIR: adapterDataDir
+      },
+      stdio: ['ignore', 'ignore', 'ignore']
+    });
+    adapterChildExit = new Promise(resolve => adapterChild.once('exit', (code, signal) => resolve({ code, signal })));
+
+    function exactAdapterUrl(input) {
+      const url = input instanceof URL ? input : new URL(typeof input === 'string' ? input : input.url);
+      if (url.origin !== adapterBase || url.hostname !== '127.0.0.1') {
+        throw new Error('adapter-fetch-origin-rejected');
+      }
+      return url;
+    }
+    async function adapterFetch(input, init = {}) {
+      const url = exactAdapterUrl(input);
+      const response = await fetch(url, { ...init, redirect: 'manual' });
+      if (response.status >= 300 && response.status < 400) throw new Error('adapter-fetch-redirect-rejected');
+      return response;
+    }
+    async function adapterApi(method, route, session, payload) {
+      const url = exactAdapterUrl(new URL(route, adapterBase));
+      const headers = { Accept: 'application/json', Origin: adapterBase };
+      if (session?.cookie) headers.Cookie = session.cookie;
+      if (payload !== undefined) {
+        headers['Content-Type'] = 'application/json';
+        headers['X-PaperPath-CSRF'] = session.csrf;
+      }
+      const response = await adapterFetch(url, {
+        method, headers, body: payload === undefined ? undefined : JSON.stringify(payload),
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      const raw = await response.text();
+      let json;
+      try { json = JSON.parse(raw); } catch { throw new Error('adapter-invalid-json:' + method + ':' + route + ':' + response.status); }
+      return { status: response.status, json };
+    }
+
+    let ready = false;
+    const readyDeadline = Date.now() + 25000;
+    while (!ready && Date.now() < readyDeadline) {
+      if (adapterChild.exitCode !== null || adapterChild.signalCode !== null) {
+        throw new Error('adapter-app-child-exited-before-ready');
+      }
+      try {
+        const response = await adapterFetch(new URL('/health', adapterBase), { signal: AbortSignal.timeout(1000) });
+        const payload = await response.json();
+        ready = response.status === 200 && payload.protocol === '2025-11-25';
+      } catch {
+        // The owned app may not have bound its loopback listener yet.
+      }
+      if (!ready) await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.ok(ready, 'adapter app readiness deadline');
+
+    async function newSession() {
+      const response = await adapterFetch(new URL('/api/session', adapterBase), { signal: AbortSignal.timeout(timeoutMs) });
+      assert.equal(response.status, 200);
+      const body = await response.clone().json();
+      assert.equal(body.providerReady, false, 'adapter phase has no provider credential');
+      return sessionFrom(response);
+    }
+    const ownerA = await newSession();
+    const ownerB = await newSession();
+    const ownerAId = ownerA.cookie.slice('paperpath_session='.length);
+    const ownerBId = ownerB.cookie.slice('paperpath_session='.length);
+    assert.ok(ownerAId && ownerBId && ownerAId !== ownerBId);
+
+    const created = await adapterApi('POST', '/api/cases', ownerA, { idempotencyKey: 'case_' + randomUUID() });
+    assert.equal(created.status, 200);
+    const packet = created.json.packet;
+    const messageKey = 'msg_' + randomUUID();
+    const sourceText = 'Morgan Bell volunteers as coordinator at the north gate.';
+    const candidateList = [{ field: 'name', value: 'Morgan Bell', quote: 'Morgan Bell' }];
+    const dbPath = path.join(adapterDataDir, 'paperpath.sqlite');
+
+    seedStore = new Store(dbPath);
+    const reservation = seedStore.reserveMessage(ownerAId, packet.id, packet.revision, messageKey, sourceText);
+    assert.equal(reservation.state, 'pending');
+    assert.equal(reservation.acquired, true);
+    const attemptToken = reservation.attemptToken;
+    assert.match(attemptToken, /^[a-f0-9]{32}$/);
+    seedStore.close();
+    seedStore = null;
+
+    snapshotDb = new DatabaseSync(dbPath);
+    const snapshot = () => ({
+      cases: snapshotDb.prepare('SELECT * FROM cases WHERE id=?').all(packet.id),
+      operations: snapshotDb.prepare('SELECT * FROM operations WHERE owner=? AND key=?').all(ownerAId, messageKey),
+      reservations: snapshotDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerAId, messageKey)
+    });
+
+    async function withAdapterMcp(session, action) {
+      const client = new Client({ name: 'PaperPath adapter proof', version: '0.1.0' });
+      const owner = session.cookie.slice('paperpath_session='.length);
+      const transport = new StreamableHTTPClientTransport(new URL('/mcp', adapterBase), {
+        requestInit: { headers: {
+          Authorization: 'Bearer ' + syntheticSecret,
+          'X-PaperPath-Owner': owner
+        } },
+        fetch: adapterFetch
+      });
+      try {
+        await client.connect(transport);
+        return await action(client);
+      } finally {
+        await client.close();
+      }
+    }
+    async function completeCall(session, args) {
+      return withAdapterMcp(session, client => client.callTool({
+        name: 'complete_message', arguments: args
+      }));
+    }
+
+    const listing = await withAdapterMcp(ownerA, client => client.listTools());
+    const completionTool = listing.tools.find(tool => tool.name === 'complete_message');
+    const proposalTool = listing.tools.find(tool => tool.name === 'propose_facts');
+    assert.ok(completionTool, 'complete_message is registered');
+    assert.ok(proposalTool, 'propose_facts remains registered');
+    const completionProperties = completionTool.inputSchema.properties;
+    assert.deepEqual(Object.keys(completionProperties).sort(),
+      ['attemptToken', 'candidates', 'caseId', 'expectedRevision', 'idempotencyKey', 'sourceText'].sort());
+    assert.equal(Object.hasOwn(completionProperties, 'owner'), false);
+    assert.deepEqual([...completionTool.inputSchema.required].sort(),
+      ['attemptToken', 'candidates', 'caseId', 'expectedRevision', 'idempotencyKey', 'sourceText'].sort());
+    const proposalProperties = proposalTool.inputSchema.properties;
+    assert.deepEqual(Object.keys(proposalProperties).sort(),
+      ['candidates', 'caseId', 'expectedRevision', 'idempotencyKey', 'sourceText'].sort());
+    assert.equal(proposalProperties.candidates.type, 'array');
+    assert.equal(proposalProperties.candidates.maxItems, 5);
+    assert.equal(proposalProperties.sourceText.minLength, 1);
+    assert.equal(proposalProperties.sourceText.maxLength, 4000);
+
+    const completionArgs = {
+      caseId: packet.id, expectedRevision: packet.revision, idempotencyKey: messageKey,
+      sourceText, attemptToken, candidates: candidateList
+    };
+    async function rejectedWithoutMutation(session, args, label) {
+      const before = snapshot();
+      const result = await completeCall(session, args);
+      assert.equal(result.isError, true, label + ' is rejected');
+      assert.equal(JSON.stringify(result).includes(attemptToken), false, label + ' result omits attempt token');
+      assert.deepEqual(snapshot(), before, label + ' leaves case, operations, and reservation unchanged');
+      return result;
+    }
+    async function rejectsUnknownFieldWithoutMutation() {
+      const before = snapshot();
+      let result;
+      let rejected = false;
+      let rejectionCode;
+      try {
+        result = await completeCall(ownerA, { ...completionArgs, owner: ownerBId });
+      } catch (error) {
+        rejected = true;
+        rejectionCode = error?.code;
+      }
+      assert.ok(rejected || result?.isError === true, 'strict MCP schema rejects unknown owner field');
+      if (rejected) assert.equal(rejectionCode, -32602, 'unknown owner field is an InvalidParams rejection');
+      assert.deepEqual(snapshot(), before, 'unknown owner field leaves case, operations, and reservation unchanged');
+    }
+
+    await rejectedWithoutMutation(ownerB, completionArgs, 'wrong owner');
+    const wrongToken = attemptToken === '0'.repeat(32) ? '1'.repeat(32) : '0'.repeat(32);
+    await rejectedWithoutMutation(ownerA, { ...completionArgs, attemptToken: wrongToken }, 'wrong token');
+    await rejectedWithoutMutation(ownerA, {
+      ...completionArgs, sourceText: 'A different source message with no matching reservation.'
+    }, 'wrong source text');
+    await rejectedWithoutMutation(ownerA, {
+      ...completionArgs, expectedRevision: packet.revision + 1
+    }, 'wrong revision');
+    await rejectsUnknownFieldWithoutMutation();
+
+    const completedResult = await completeCall(ownerA, completionArgs);
+    assert.equal(completedResult.isError, undefined);
+    assert.equal(JSON.stringify(completedResult).includes(attemptToken), false, 'completion result omits attempt token');
+    const completed = completedResult.structuredContent;
+    assert.ok(completed);
+    assert.equal(completed.revision, packet.revision + 1);
+    assert.equal(completed.sources.length, 1);
+    assert.equal(completed.sources[0].text, sourceText);
+    assert.equal(completed.facts.name.value, 'Morgan Bell');
+    assert.equal(Object.hasOwn(completed, 'reservation'), false);
+    const committedSnapshot = snapshot();
+    assert.equal(committedSnapshot.cases.length, 1);
+    assert.equal(committedSnapshot.operations.length, 1);
+    assert.equal(committedSnapshot.reservations.length, 0);
+
+    const repeated = await completeCall(ownerA, completionArgs);
+    assert.equal(repeated.isError, true, 'repeated completion conflicts');
+    assert.equal(JSON.stringify(repeated).includes(attemptToken), false, 'repeat result omits attempt token');
+    assert.deepEqual(snapshot(), committedSnapshot, 'repeat adds no operation, source, or reservation');
+
+    const corrected = await adapterApi('POST', '/api/cases/' + packet.id + '/correct', ownerA, {
+      expectedRevision: completed.revision, idempotencyKey: 'fix_' + randomUUID(),
+      field: 'name', value: 'Morgan Bell Corrected'
+    });
+    assert.equal(corrected.status, 200);
+    assert.equal(corrected.json.packet.facts.name.value, 'Morgan Bell Corrected');
+
+    const beforeReplayProviderCalls = providerCalls;
+    const replay = await adapterApi('POST', '/api/cases/' + packet.id + '/message', ownerA, {
+      expectedRevision: packet.revision, idempotencyKey: messageKey, text: sourceText
+    });
+    assert.equal(replay.status, 200);
+    assert.deepEqual(replay.json.packet, corrected.json.packet,
+      'completed HTTP replay returns the corrected current case');
+    assert.equal(providerCalls, beforeReplayProviderCalls, 'completed replay adds no provider call');
+
+    const eventLog = await readFile(path.join(adapterDataDir, 'mcp-events.jsonl'), 'utf8');
+    assert.ok(eventLog.length > 0, 'existing metadata event log was exercised');
+    assert.equal(eventLog.includes(attemptToken), false, 'metadata logs omit attempt token');
+    assert.equal(providerCalls, priorProviderCalls, 'adapter phase preserves the four-call mock-provider count');
+
+    return {
+      sdkInitializeListCall: true, validOwnerTokenCompletesOnce: true,
+      fiveRejectionsIncludingUnknownFieldLeaveRowsUnchanged: true,
+      unknownFieldRejectedWithoutMutation: true, repeatAddsNoOperationOrSource: true,
+      proposeFactsSchemaRetained: true, tokenAbsentFromResultsAndLogs: true,
+      correctedHttpReplayWithoutProvider: true, providerCredentialAbsent: true
+    };
+  } finally {
+    const cleanupComplete = await cleanupAdapter();
+    if (!cleanupComplete) process.exitCode = 1;
+    if (adapterCleanupAction === cleanupAdapter) adapterCleanupAction = undefined;
+  }
+}
+
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.once(signal, () => {
@@ -292,12 +646,14 @@ try {
   assert.equal(retry.json.packet.facts.name.value, 'Morgan Bell');
 
   releaseHeld();
+  const adapterResult = await verifyAdapterCompletion();
   const result = {
     schema: 'paperpath-message-single-flight-test-v1', result: 'PASS',
     providerEndpointGuarded: true, providerCalls: 4,
     firstWaveCalls: 2, ownerIsolation: true, identicalDedup: true, changedPayload409: true,
     committedReplayNoProviderCall: true, failure503AndSameKeyRetry200: true,
-    sourceEvidenceVerifiedForBothOwners: true
+    sourceEvidenceVerifiedForBothOwners: true,
+    mcpAdapterCompletion: adapterResult
   };
   console.log(JSON.stringify(result));
 } finally {

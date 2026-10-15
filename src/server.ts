@@ -62,6 +62,20 @@ function toolServer(owner:string, approval?:string) {
     inputSchema:{idempotencyKey:z.string()}},args=>output(()=>store.create(owner,args.idempotencyKey)));
   server.registerTool('get_case',{description:'Read the current owned packet and evidence.',inputSchema:{caseId:uuid}},
     args=>output(()=>store.get(owner,args.caseId)));
+  const completeMessageArgs = z.object({
+    caseId:uuid,
+    expectedRevision:z.number().int().positive(),
+    idempotencyKey:z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/),
+    sourceText:z.string().min(1).max(4000),
+    attemptToken:z.string().regex(/^[a-f0-9]{32}$/),
+    candidates:z.array(candidateSchema).max(5),
+  }).strict();
+  server.registerTool('complete_message',{description:'Complete an already acquired owned message reservation.',
+    inputSchema:completeMessageArgs},args=>output(()=>{
+      const input = completeMessageArgs.parse(args);
+      return store.completeMessage(owner,input.caseId,input.expectedRevision,input.idempotencyKey,
+        input.sourceText,input.attemptToken,input.candidates);
+    }));
   const revisionArgs = {caseId:uuid,expectedRevision:z.number().int().positive(),idempotencyKey:z.string()};
   server.registerTool('propose_facts',{description:'Propose facts explicitly supported by immutable applicant text; differing values become conflicts.',
     inputSchema:{...revisionArgs,sourceText:z.string().min(1).max(4000),candidates:z.array(candidateSchema).max(5)}},
