@@ -15,5 +15,11 @@ globalThis.fetch = (input, init) => {
   if (target.origin !== allowed.origin || target.protocol !== 'http:' || target.hostname !== '127.0.0.1') {
     throw new Error('test-fetch-origin-rejected');
   }
-  return originalFetch(input, init);
+  return originalFetch(input, {...init, redirect: 'manual'}).then(async response => {
+    if ((response.status >= 300 && response.status < 400) || response.type === 'opaqueredirect') {
+      await response.body?.cancel();
+      throw new Error('test-fetch-redirect-rejected');
+    }
+    return response;
+  });
 };

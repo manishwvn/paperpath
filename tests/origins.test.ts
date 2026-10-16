@@ -93,6 +93,50 @@ test('configured public authority serves HTTP and MCP-backed API; rejects cross-
   assert.ok((await created.json() as {packet:{id:string}}).packet.id);
 });
 
+test('test fetch guard rejects redirects without contacting the redirect target',async()=>{
+  const appPort=await freePort();
+  const targetPort=await freePort();
+  const appOrigin=`http://127.0.0.1:${appPort}`;
+  const script=`
+    import assert from 'node:assert/strict';
+    import { createServer } from 'node:http';
+    const targetPort=${targetPort};
+    let targetHits=0;
+    const target=createServer((_request,response)=>{targetHits++;response.end('unexpected');});
+    const app=createServer((_request,response)=>{response.writeHead(302,{Location:'http://127.0.0.1:'+targetPort+'/escape'});response.end();});
+    const listen=server=>new Promise((resolve,reject)=>server.listen(server===app?${appPort}:targetPort,'127.0.0.1',resolve).once('error',reject));
+    const close=server=>new Promise((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    await Promise.all([listen(app),listen(target)]);
+    try {
+      await assert.rejects(fetch('http://127.0.0.1:${appPort}/redirect'),/test-fetch-redirect-rejected/);
+      assert.equal(targetHits,0);
+      console.log('FETCH_REDIRECT_GUARD_PASS');
+    } finally { await Promise.all([close(app),close(target)]); }
+  `;
+  const child=spawn(process.execPath,['--import',fetchGuard,'--input-type=module','-e',script],{
+    cwd:project,
+    env:{PATH:process.env.PATH??'/usr/bin:/bin',LANG:'C.UTF-8',PAPERPATH_TEST_ALLOWED_FETCH_ORIGIN:appOrigin},
+    stdio:['ignore','pipe','pipe'],
+  });
+  let stdout='';
+  let stderr='';
+  child.stdout.setEncoding('utf8').on('data',(chunk:string)=>{stdout+=chunk;});
+  child.stderr.setEncoding('utf8').on('data',(chunk:string)=>{stderr+=chunk;});
+  const childExit=new Promise<{code:number|null;signal:NodeJS.Signals|null}>((resolve,reject)=>{
+    child.once('error',reject);
+    child.once('exit',(code,signal)=>resolve({code,signal}));
+  });
+  let result:{code:number|null;signal:NodeJS.Signals|null};
+  try { result=await boundedExit(childExit,10_000); }
+  catch (error) {
+    child.kill('SIGTERM');
+    try { await boundedExit(childExit,5_000); } catch { /* Preserve state if the owned child does not exit. */ }
+    throw error;
+  }
+  assert.equal(result.code,0,stderr);
+  assert.match(stdout,/FETCH_REDIRECT_GUARD_PASS/);
+});
+
 test('invalid public-origin config exits before creating runtime files',async()=>{
   const dataDir = await mkdtemp(join(tmpdir(),'paperpath-invalid-origin-'));
   const port = await freePort();
