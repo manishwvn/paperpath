@@ -18,6 +18,7 @@ const timeoutMs = 8000;
 const held = [];
 let providerCalls = 0;
 let failNext = false;
+let holdNextProviderResponse = false;
 let child;
 let childExit;
 let mock;
@@ -103,6 +104,20 @@ async function stopChild() {
     clearTimeout(timer);
     if (!exited) throw new Error('owned-child-exit-timeout; preserve-test-data');
   }
+}
+async function crashOwnedChild() {
+  if (!child || !childExit || child.exitCode !== null || child.signalCode !== null) {
+    throw new Error('owned-app-child-not-running-for-crash-proof');
+  }
+  child.kill('SIGKILL');
+  let timer;
+  const exit = await Promise.race([
+    childExit,
+    new Promise(resolve => { timer = setTimeout(() => resolve(undefined), 3000); })
+  ]);
+  clearTimeout(timer);
+  if (!exit) throw new Error('owned-app-child-crash-timeout');
+  assert.equal(exit.signal, 'SIGKILL', 'only the owned app child is terminated to model a crash');
 }
 async function removeKnown(dir, filenames) {
   for (const name of filenames) {
@@ -589,6 +604,7 @@ try {
         return;
       }
       if (failNext) { failNext = false; finishProvider(res, 400); return; }
+      if (holdNextProviderResponse) { holdNextProviderResponse = false; held.push(res); return; }
       if (providerCalls <= 2) { held.push(res); return; }
       finishProvider(res);
     });
@@ -648,31 +664,34 @@ globalThis.fetch=async(input,init={})=>{
   return response
 };`;
   await writeFile(preloadPath, preload, { flag: 'wx', mode: 0o600 });
-  child = spawn(process.execPath, ['--import', preloadPath, '--experimental-strip-types', 'src/server.ts'], {
-    cwd: appRoot,
-    env: {
-      PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: dataDir, TMPDIR: dataDir,
-      PORT: String(appPort), PAPERPATH_DATA_DIR: dataDir,
-      GROQ_API_KEY: 'synthetic-local-only', GROQ_MODEL: 'openai/gpt-oss-20b',
-      PAPERPATH_TEST_APP_BASE_URL: base, PAPERPATH_TEST_PROVIDER_MOCK_URL: mockBase
-    },
-    stdio: ['ignore', 'ignore', 'ignore']
-  });
-  childExit = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
-  let ready = false;
-  const readyDeadline = Date.now() + 25000;
-  while (!ready && Date.now() < readyDeadline) {
-    if (child.exitCode !== null || child.signalCode !== null) throw new Error('app-child-exited-before-ready');
-    try {
-      const response = await localFetch(new URL('/health', base), { signal: AbortSignal.timeout(1000) });
-      const payload = await response.json();
-      ready = response.status === 200 && payload.protocol === '2025-11-25';
-    } catch {
-      // App may not have bound the listener yet.
+  async function startMainChild() {
+    child = spawn(process.execPath, ['--import', preloadPath, '--experimental-strip-types', 'src/server.ts'], {
+      cwd: appRoot,
+      env: {
+        PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8', HOME: dataDir, TMPDIR: dataDir,
+        PORT: String(appPort), PAPERPATH_DATA_DIR: dataDir,
+        GROQ_API_KEY: 'synthetic-local-only', GROQ_MODEL: 'openai/gpt-oss-20b',
+        PAPERPATH_TEST_APP_BASE_URL: base, PAPERPATH_TEST_PROVIDER_MOCK_URL: mockBase
+      },
+      stdio: ['ignore', 'ignore', 'ignore']
+    });
+    childExit = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
+    let ready = false;
+    const readyDeadline = Date.now() + 25000;
+    while (!ready && Date.now() < readyDeadline) {
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error('app-child-exited-before-ready');
+      try {
+        const response = await localFetch(new URL('/health', base), { signal: AbortSignal.timeout(1000) });
+        const payload = await response.json();
+        ready = response.status === 200 && payload.protocol === '2025-11-25';
+      } catch {
+        // App may not have bound the listener yet.
+      }
+      if (!ready) await new Promise(resolve => setTimeout(resolve, 100));
     }
-    if (!ready) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.ok(ready, 'app readiness deadline');
   }
-  assert.ok(ready, 'app readiness deadline');
+  await startMainChild();
 
   async function newSession() {
     const response = await localFetch(new URL('/api/session', base), { signal: AbortSignal.timeout(timeoutMs) });
@@ -808,15 +827,78 @@ globalThis.fetch=async(input,init={})=>{
     mainDb.close();
   }
 
+  const crashCaseResult = await api('POST', '/api/cases', ownerA, {
+    idempotencyKey: `caseCrash_${randomUUID()}`
+  });
+  assert.equal(crashCaseResult.status, 200);
+  const crashCase = crashCaseResult.json.packet;
+  const crashMessageKey = `msg_${randomUUID()}`;
+  const crashMessageText = 'Morgan Bell is available for the east gate shift.';
+  const crashMessageBody = {
+    expectedRevision: crashCase.revision,
+    idempotencyKey: crashMessageKey,
+    text: crashMessageText
+  };
+  const crashMessagePath = `/api/cases/${crashCase.id}/message`;
+  const providerCallsBeforeCrash = providerCalls;
+  holdNextProviderResponse = true;
+  const crashRequestOutcome = api('POST', crashMessagePath, ownerA, crashMessageBody).then(
+    response => ({ kind: 'response', response }),
+    error => ({ kind: 'network-error', error })
+  );
+  await waitUntil(() => providerCalls === providerCallsBeforeCrash + 1 && held.length === 1,
+    'midflight-provider-request-held');
+  assert.equal(providerCalls, providerCallsBeforeCrash + 1,
+    'the provider mock received the request before the app process is terminated');
+
+  await crashOwnedChild();
+  const crashedRequest = await crashRequestOutcome;
+  assert.equal(crashedRequest.kind, 'network-error',
+    'the in-flight HTTP request loses its response when its app process crashes');
+
+  function readCrashSnapshot() {
+    const db = new DatabaseSync(path.join(dataDir, 'paperpath.sqlite'));
+    try {
+      return {
+        operation: db.prepare('SELECT * FROM operations WHERE owner=? AND key=?').all(ownerAId, crashMessageKey),
+        reservation: db.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?')
+          .all(ownerAId, crashMessageKey),
+        packet: db.prepare('SELECT revision,body FROM cases WHERE id=?').get(crashCase.id)
+      };
+    } finally {
+      db.close();
+    }
+  }
+  const pendingAfterCrash = readCrashSnapshot();
+  assert.equal(pendingAfterCrash.operation.length, 0, 'the interrupted extraction did not complete an operation');
+  assert.equal(pendingAfterCrash.reservation.length, 1, 'the in-flight reservation survives process death');
+  const crashAttemptToken = pendingAfterCrash.reservation[0].attempt_token;
+  assert.match(crashAttemptToken, /^[a-f0-9]{32}$/);
+  assert.equal(pendingAfterCrash.packet.revision, crashCase.revision);
+  assert.deepEqual(JSON.parse(pendingAfterCrash.packet.body), crashCase,
+    'crash leaves the case facts and sources unchanged');
+
+  await startMainChild();
+  const crashReplay = await api('POST', crashMessagePath, ownerA, crashMessageBody);
+  assert.equal(crashReplay.status, 409, 'same-key replay after crash remains pending');
+  assert.equal(crashReplay.json.error, 'MESSAGE_PENDING', 'pending state is actionable to the HTTP client');
+  assert.equal(JSON.stringify(crashReplay.json).includes(crashAttemptToken), false,
+    'pending HTTP response does not expose the server attempt token');
+  assert.equal(providerCalls, providerCallsBeforeCrash + 1,
+    'restart and replay issue zero additional provider requests');
+  assert.deepEqual(readCrashSnapshot(), pendingAfterCrash,
+    'same-key replay preserves the reservation token, operation absence, and case snapshot');
+
   releaseHeld();
   const adapterResult = await verifyAdapterCompletion();
   const result = {
     schema: 'paperpath-message-single-flight-test-v1', result: 'PASS',
-    providerEndpointGuarded: true, providerCalls: 5,
+    providerEndpointGuarded: true, providerCalls: 6,
     firstWaveCalls: 2, ownerIsolation: true, identicalDedup: true, changedPayload409: true,
     committedReplayNoProviderCall: true, unknownFailureRemainsPendingWithoutRetry: true,
     completionMcpFailureLeavesReservationPendingWithoutRetry: true,
     lostCompletionResponseReplayDiscoversCommitWithoutRetry: true,
+    midflightProcessCrashRemainsPendingWithoutRetry: true,
     sourceEvidenceVerifiedForBothOwners: true,
     mcpAdapterCompletion: adapterResult
   };
