@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import { Worker } from 'node:worker_threads';
 import { DomainError, Store, type Candidate } from '../src/domain.ts';
 
 let reservationSequence = 0;
@@ -161,6 +162,7 @@ test('reopened database keeps pending reservation unacquired without replacement
     if (second.state !== 'pending') assert.fail('expected pending');
     assert.equal(second.acquired, false);
     assert.ok(!('attemptToken' in second));
+    assert.equal(secondStore.completeMessage(owner,created.id,created.revision,key,text,first.attemptToken,[]).revision,created.revision+1);
   } finally {
     for (const store of stores) store.close();
     await cleanupOwnedDirectory(directory);
@@ -586,4 +588,93 @@ test('reservation deletion failure rolls back completion and retains the token r
     for (const store of stores) store.close();
     await cleanupOwnedDirectory(directory);
   }
+});
+
+
+function reservationDurableSnapshot(s: Store): string {
+return JSON.stringify({cases:s.db.prepare('SELECT id,owner,revision,body FROM cases ORDER BY id').all(),
+operations:s.db.prepare('SELECT owner,key,payload_hash,result FROM operations ORDER BY owner,key').all(),
+reservations:s.db.prepare('SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token,created_at FROM message_reservations ORDER BY owner,key').all()});
+}
+async function reservationFixture() {
+const directory=await mkdtemp(join(tmpdir(),'paperpath-reservation-release-')), databasePath=join(directory,'paperpath.sqlite'), stores:Store[]=[];
+const store=new Store(databasePath); stores.push(store);
+const owner=store.session(), packet=store.create(owner,reservationKey()), key=reservationKey(), text=validSource;
+const acquired=store.reserveMessage(owner,packet.id,packet.revision,key,text);
+if(acquired.state!=='pending'||acquired.acquired!==true) assert.fail('expected acquired');
+return {directory,databasePath,stores,store,owner,packet,key,text,token:acquired.attemptToken};
+}
+function observeReservation(f: Awaited<ReturnType<typeof reservationFixture>>): Store {
+const s=new Store(f.databasePath); f.stores.push(s); return s;
+}
+async function closeReservationFixture(f: Awaited<ReturnType<typeof reservationFixture>>): Promise<void> {
+for(const s of f.stores) s.close();
+await cleanupOwnedDirectory(f.directory);
+}
+function assertUnchanged(s:Store, action:()=>unknown, code='IDEMPOTENCY_CONFLICT'):void {
+const before=reservationDurableSnapshot(s); expectDomainError(action,code); assert.equal(reservationDurableSnapshot(s),before);
+}
+test('release and reacquire require exact binding and fresh token',{timeout:10000},async()=>{
+const f=await reservationFixture();
+try {
+const observer=observeReservation(f);
+const release=(x:Partial<{owner:string;id:string;rev:number;key:string;text:string;token:string;outcome:string}>={})=>f.store.releaseMessage(x.owner??f.owner,x.id??f.packet.id,x.rev??f.packet.revision,x.key??f.key,x.text??f.text,x.token??f.token,(x.outcome??'not-started') as 'not-started'|'definitively-failed');
+const complete=(token=f.token)=>f.store.completeMessage(f.owner,f.packet.id,f.packet.revision,f.key,f.text,token,completeCandidates);
+assertUnchanged(observer,()=>release({outcome:'timeout'}),'INVALID_MESSAGE_OUTCOME');
+for(const token of ['', 'bad', 'A'.repeat(32)]) {
+assertUnchanged(observer,()=>release({token}));
+assertUnchanged(observer,()=>complete(token));
+}
+const otherOwner=f.store.session(), otherCase=f.store.create(f.owner,reservationKey());
+for(const action of [
+()=>release({owner:otherOwner}),
+()=>release({key:f.key+'x'}),
+()=>release({id:otherCase.id}),
+()=>release({rev:f.packet.revision+1}),
+()=>release({text:f.text+' changed'}),
+()=>release({token:'00000000000000000000000000000000'}),
+]) assertUnchanged(observer,action);
+const fp=String(f.store.db.prepare('SELECT fingerprint FROM message_reservations WHERE owner=? AND key=?').get(f.owner,f.key)?.fingerprint);
+f.store.db.prepare('UPDATE message_reservations SET fingerprint=? WHERE owner=? AND key=?').run('bad',f.owner,f.key);
+assertUnchanged(observer,()=>release());
+f.store.db.prepare('UPDATE message_reservations SET fingerprint=? WHERE owner=? AND key=?').run(fp,f.owner,f.key);
+release({outcome:'definitively-failed'});
+assert.equal(String(f.store.db.prepare('SELECT attempt_token FROM message_reservations WHERE owner=? AND key=?').get(f.owner,f.key)?.attempt_token),'');
+assertUnchanged(observer,()=>complete());
+assertUnchanged(observer,()=>complete(''));
+const before=reservationDurableSnapshot(observer);
+expectDomainError(()=>observer.reserveMessage(f.owner,f.packet.id,f.packet.revision,f.key,f.text+' changed'),'IDEMPOTENCY_CONFLICT');
+assert.equal(reservationDurableSnapshot(observer),before);
+const gate=new Int32Array(new SharedArrayBuffer(4));
+const worker=new Worker("const{parentPort:p,workerData:d}=require('node:worker_threads');(async()=>{const{Store}=await import(d.url);p.postMessage('ready');const g=new Int32Array(d.g);Atomics.wait(g,0,0);const s=new Store(d.path);try{p.postMessage(s.reserveMessage(d.owner,d.id,d.rev,d.key,d.text))}finally{s.close()}})()",{eval:true,workerData:{url:new URL('../src/domain.ts',import.meta.url).href,g:gate.buffer,path:f.databasePath,owner:f.owner,id:f.packet.id,rev:f.packet.revision,key:f.key,text:f.text}});
+try {
+await new Promise<void>((resolve,reject)=>{worker.once('message',m=>m==='ready'?resolve():reject(new Error('worker failed')));worker.once('error',reject);worker.once('exit',code=>reject(new Error('worker exited '+code)));});
+const workerResult=new Promise<ReturnType<Store['reserveMessage']>>((resolve,reject)=>{worker.once('message',m=>resolve(m));worker.once('error',reject);worker.once('exit',code=>reject(new Error('worker exited '+code)));});
+Atomics.store(gate,0,1);Atomics.notify(gate,0);
+const results=[f.store.reserveMessage(f.owner,f.packet.id,f.packet.revision,f.key,f.text),await workerResult];
+const acquired=results.find(r=>r.state==='pending'&&r.acquired);
+assert.equal(results.filter(r=>r.state==='pending'&&r.acquired).length,1);
+assert.equal(results.filter(r=>r.state==='pending'&&!r.acquired).length,1);
+if(!acquired||acquired.state!=='pending'||acquired.acquired!==true) assert.fail('expected one acquisition');
+assert.match(acquired.attemptToken,/^[a-f0-9]{32}$/); assert.notEqual(acquired.attemptToken,f.token);
+assertUnchanged(observer,()=>release());
+assert.equal(complete(acquired.attemptToken).revision,f.packet.revision+1);
+} finally { await worker.terminate(); }
+} finally { await closeReservationFixture(f); }
+});
+test('SQL abort rolls back release and reacquire',async()=>{
+const f=await reservationFixture();
+try {
+const observer=observeReservation(f);
+f.store.db.exec("CREATE TRIGGER release_abort_test BEFORE UPDATE ON message_reservations BEGIN SELECT RAISE(ABORT, 'release blocked'); END;");
+let before=reservationDurableSnapshot(observer);
+assert.throws(()=>f.store.releaseMessage(f.owner,f.packet.id,f.packet.revision,f.key,f.text,f.token,'not-started'),/release blocked/);
+assert.equal(reservationDurableSnapshot(observer),before);
+f.store.db.exec('DROP TRIGGER release_abort_test');
+f.store.releaseMessage(f.owner,f.packet.id,f.packet.revision,f.key,f.text,f.token,'not-started');
+f.store.db.exec("CREATE TRIGGER reacquire_abort_test BEFORE UPDATE ON message_reservations WHEN OLD.attempt_token='' BEGIN SELECT RAISE(ABORT, 'reacquire blocked'); END;");
+before=reservationDurableSnapshot(observer);
+assert.throws(()=>f.store.reserveMessage(f.owner,f.packet.id,f.packet.revision,f.key,f.text),/reacquire blocked/);
+assert.equal(reservationDurableSnapshot(observer),before);
+} finally { await closeReservationFixture(f); }
 });
