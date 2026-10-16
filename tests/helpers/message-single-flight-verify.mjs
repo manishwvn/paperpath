@@ -28,6 +28,8 @@ let preloadDir;
 let preloadPath;
 let base;
 let mockBase;
+const completionDispatchFailureKey = `msg_${randomUUID()}`;
+const lostCompletionResponseKey = `msg_${randomUUID()}`;
 let adapterCleanupAction;
 let cleanupTask;
 
@@ -121,7 +123,7 @@ function cleanup() {
       try { if (adapterCleanupAction) await adapterCleanupAction(); } catch (error) { cleanupErrors.push(error); }
       try { await closeServer(mock); } catch (error) { cleanupErrors.push(error); }
       if (childStopped && dataDir) {
-        try { await removeKnown(dataDir, ['service-secret.txt', 'paperpath.sqlite', 'paperpath.sqlite-journal', 'paperpath.sqlite-wal', 'paperpath.sqlite-shm', 'mcp-events.jsonl']); }
+        try { await removeKnown(dataDir, ['service-secret.txt', 'paperpath.sqlite', 'paperpath.sqlite-journal', 'paperpath.sqlite-wal', 'paperpath.sqlite-shm', 'mcp-events.jsonl', 'completion-dispatch-failure.injected', 'completion-response-loss.injected']); }
         catch (error) { cleanupErrors.push(error); }
       }
       if (preloadPath) { try { await unlink(preloadPath); } catch (error) { cleanupErrors.push(error); } }
@@ -293,18 +295,6 @@ async function verifyAdapterCompletion() {
       ' return response};';
     await writeFile(adapterPreloadPath, preload, { flag: 'wx', mode: 0o600 });
 
-    adapterChild = spawn(process.execPath, ['--import', adapterPreloadPath,
-      '--experimental-strip-types', 'src/server.ts'], {
-      cwd: appRoot,
-      env: {
-        PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8',
-        HOME: adapterDataDir, TMPDIR: adapterDataDir,
-        PORT: String(adapterPort), PAPERPATH_DATA_DIR: adapterDataDir
-      },
-      stdio: ['ignore', 'ignore', 'ignore']
-    });
-    adapterChildExit = new Promise(resolve => adapterChild.once('exit', (code, signal) => resolve({ code, signal })));
-
     function exactAdapterUrl(input) {
       const url = input instanceof URL ? input : new URL(typeof input === 'string' ? input : input.url);
       if (url.origin !== adapterBase || url.hostname !== '127.0.0.1') {
@@ -336,22 +326,36 @@ async function verifyAdapterCompletion() {
       return { status: response.status, json };
     }
 
-    let ready = false;
-    const readyDeadline = Date.now() + 25000;
-    while (!ready && Date.now() < readyDeadline) {
-      if (adapterChild.exitCode !== null || adapterChild.signalCode !== null) {
-        throw new Error('adapter-app-child-exited-before-ready');
+    async function startAdapterChild() {
+      adapterChild = spawn(process.execPath, ['--import', adapterPreloadPath,
+        '--experimental-strip-types', 'src/server.ts'], {
+        cwd: appRoot,
+        env: {
+          PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8',
+          HOME: adapterDataDir, TMPDIR: adapterDataDir,
+          PORT: String(adapterPort), PAPERPATH_DATA_DIR: adapterDataDir
+        },
+        stdio: ['ignore', 'ignore', 'ignore']
+      });
+      adapterChildExit = new Promise(resolve => adapterChild.once('exit', (code, signal) => resolve({ code, signal })));
+      let ready = false;
+      const readyDeadline = Date.now() + 25000;
+      while (!ready && Date.now() < readyDeadline) {
+        if (adapterChild.exitCode !== null || adapterChild.signalCode !== null) {
+          throw new Error('adapter-app-child-exited-before-ready');
+        }
+        try {
+          const response = await adapterFetch(new URL('/health', adapterBase), { signal: AbortSignal.timeout(1000) });
+          const payload = await response.json();
+          ready = response.status === 200 && payload.protocol === '2025-11-25';
+        } catch {
+          // The owned app may not have bound the loopback listener yet.
+        }
+        if (!ready) await new Promise(resolve => setTimeout(resolve, 100));
       }
-      try {
-        const response = await adapterFetch(new URL('/health', adapterBase), { signal: AbortSignal.timeout(1000) });
-        const payload = await response.json();
-        ready = response.status === 200 && payload.protocol === '2025-11-25';
-      } catch {
-        // The owned app may not have bound its loopback listener yet.
-      }
-      if (!ready) await new Promise(resolve => setTimeout(resolve, 100));
+      assert.ok(ready, 'adapter app readiness deadline');
     }
-    assert.ok(ready, 'adapter app readiness deadline');
+    await startAdapterChild();
 
     async function newSession() {
       const response = await adapterFetch(new URL('/api/session', adapterBase), { signal: AbortSignal.timeout(timeoutMs) });
@@ -390,14 +394,19 @@ async function verifyAdapterCompletion() {
       reservations: snapshotDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerAId, messageKey)
     });
 
+    const tokenBeforeRestart = snapshot().reservations[0]?.attempt_token;
+    assert.equal(tokenBeforeRestart, attemptToken);
+    assert.equal(await stopOwnedChild(), true);
+    await startAdapterChild();
+
     const pendingHttp = await adapterApi('POST', '/api/cases/' + packet.id + '/message', ownerA, {
       expectedRevision: packet.revision, idempotencyKey: messageKey, text: sourceText
     });
-    assert.equal(pendingHttp.status, 409, 'an already acquired reservation is reported pending');
+    assert.equal(pendingHttp.status, 409, 'a reservation remains pending after server restart');
     assert.equal(pendingHttp.json.error, 'MESSAGE_PENDING');
-    assert.equal(providerCalls, priorProviderCalls, 'a pending reservation does not invoke extraction');
-    assert.equal(snapshot().reservations[0]?.attempt_token, attemptToken,
-      'pending HTTP request leaves the original server token unchanged');
+    assert.equal(providerCalls, priorProviderCalls, 'a restarted pending reservation does not invoke extraction');
+    assert.equal(snapshot().reservations[0]?.attempt_token, tokenBeforeRestart,
+      'restart and same-request replay leave the original server token unchanged');
 
     const noKeyMessageKey = 'msg_' + randomUUID();
     const noKeyMessageText = 'Morgan Bell prefers Saturday shifts.';
@@ -539,7 +548,7 @@ async function verifyAdapterCompletion() {
     const eventLog = await readFile(path.join(adapterDataDir, 'mcp-events.jsonl'), 'utf8');
     assert.ok(eventLog.length > 0, 'existing metadata event log was exercised');
     assert.equal(eventLog.includes(attemptToken), false, 'metadata logs omit attempt token');
-    assert.equal(providerCalls, priorProviderCalls, 'adapter phase preserves the four-call mock-provider count');
+    assert.equal(providerCalls, priorProviderCalls, 'adapter phase makes no provider calls');
 
     return {
       sdkInitializeListCall: true, validOwnerTokenCompletesOnce: true,
@@ -547,7 +556,8 @@ async function verifyAdapterCompletion() {
       unknownFieldRejectedWithoutMutation: true, repeatAddsNoOperationOrSource: true,
       proposeFactsSchemaRetained: true, tokenAbsentFromResultsAndLogs: true,
       correctedHttpReplayWithoutProvider: true, providerCredentialAbsent: true,
-      pendingHttpReservationIsNotReinferred: true, knownNotStartedReservationIsReleased: true
+      pendingHttpReservationIsNotReinferred: true, knownNotStartedReservationIsReleased: true,
+      restartPendingReservationKeepsAttemptToken: true
     };
   } finally {
     const cleanupComplete = await cleanupAdapter();
@@ -590,7 +600,53 @@ try {
   await closeServer(appProbe);
   base = `http://127.0.0.1:${appPort}`;
 
-  const preload = `const appBase=${JSON.stringify(base)}; const provider='https://api.groq.com/openai/v1/chat/completions'; const mockBase=${JSON.stringify(mockBase)}; const nativeFetch=globalThis.fetch; globalThis.fetch=async(input,init={})=>{const u=typeof input==='string'?new URL(input):input instanceof URL?input:new URL(input.url); let target; if(u.href===provider){if(typeof input!=='string')throw new Error('provider-request-shape-rejected'); target=new URL('/chat/completions',mockBase)} else if(u.origin===appBase && u.hostname==='127.0.0.1') target=input; else throw new Error('network-guard-rejected'); const response=await nativeFetch(target,{...init,redirect:'manual'}); if(response.status>=300&&response.status<400)throw new Error('redirect-rejected'); return response};`;
+  const dispatchFailureMarker = path.join(dataDir, 'completion-dispatch-failure.injected');
+  const responseLossMarker = path.join(dataDir, 'completion-response-loss.injected');
+  const preload = `const appBase=${JSON.stringify(base)};
+const provider='https://api.groq.com/openai/v1/chat/completions';
+const mockBase=${JSON.stringify(mockBase)};
+const dispatchFailureKey=${JSON.stringify(completionDispatchFailureKey)};
+const lostResponseKey=${JSON.stringify(lostCompletionResponseKey)};
+const dispatchFailureMarker=${JSON.stringify(dispatchFailureMarker)};
+const responseLossMarker=${JSON.stringify(responseLossMarker)};
+const nativeFetch=globalThis.fetch;
+let dispatchFailureInjected=false;
+let responseLossInjected=false;
+function completionKey(input,init){
+  const method=(init.method??(typeof Request!=='undefined'&&input instanceof Request?input.method:'')).toUpperCase();
+  if(method!=='POST')return undefined;
+  const raw=init.body;
+  const text=typeof raw==='string'?raw:raw instanceof Uint8Array?new TextDecoder().decode(raw):undefined;
+  if(!text)return undefined;
+  let request;
+  try{request=JSON.parse(text)}catch{return undefined}
+  if(request.method!=='tools/call'||request.params?.name!=='complete_message')return undefined;
+  return request.params?.arguments?.idempotencyKey;
+}
+globalThis.fetch=async(input,init={})=>{
+  const u=typeof input==='string'?new URL(input):input instanceof URL?input:new URL(input.url);
+  let target;
+  if(u.href===provider){if(typeof input!=='string')throw new Error('provider-request-shape-rejected'); target=new URL('/chat/completions',mockBase)}
+  else if(u.origin===appBase && u.hostname==='127.0.0.1') target=input;
+  else throw new Error('network-guard-rejected');
+  const key=u.pathname==='/mcp'?completionKey(input,init):undefined;
+  if(key===dispatchFailureKey&&!dispatchFailureInjected){
+    dispatchFailureInjected=true;
+    const fs=await import('node:fs/promises');
+    await fs.writeFile(dispatchFailureMarker,'injected',{flag:'wx',mode:0o600});
+    throw new Error('injected-complete-message-dispatch-failure');
+  }
+  const response=await nativeFetch(target,{...init,redirect:'manual'});
+  if(response.status>=300&&response.status<400)throw new Error('redirect-rejected');
+  if(key===lostResponseKey&&!responseLossInjected){
+    responseLossInjected=true;
+    await response.arrayBuffer();
+    const fs=await import('node:fs/promises');
+    await fs.writeFile(responseLossMarker,'injected-after-response',{flag:'wx',mode:0o600});
+    throw new Error('injected-complete-message-response-loss');
+  }
+  return response
+};`;
   await writeFile(preloadPath, preload, { flag: 'wx', mode: 0o600 });
   child = spawn(process.execPath, ['--import', preloadPath, '--experimental-strip-types', 'src/server.ts'], {
     cwd: appRoot,
@@ -675,13 +731,92 @@ try {
   assert.equal(retry.json.error, 'MESSAGE_PENDING');
   assert.equal(providerCalls, beforeFailure + 1, 'unknown provider outcome stays pending without another call');
 
+  const completionFailureText = 'Morgan Bell asked us to confirm the north gate schedule.';
+  const completionFailureBody = {
+    expectedRevision: proofA.packet.revision,
+    idempotencyKey: completionDispatchFailureKey,
+    text: completionFailureText
+  };
+  const beforeCompletionFailure = providerCalls;
+  const completionFailure = await api('POST', messagePathA, ownerA, completionFailureBody);
+  assert.equal(completionFailure.status, 409);
+  assert.equal(completionFailure.json.error, 'MESSAGE_PENDING');
+  assert.equal(providerCalls, beforeCompletionFailure + 1,
+    'one successful extraction precedes the injected MCP dispatch failure');
+  assert.equal(await readFile(path.join(dataDir, 'completion-dispatch-failure.injected'), 'utf8'), 'injected');
+
+  const ownerAId = ownerA.cookie.slice('paperpath_session='.length);
+  const mainDb = new DatabaseSync(path.join(dataDir, 'paperpath.sqlite'));
+  const mainMessageSnapshot = key => ({
+    operation: mainDb.prepare('SELECT * FROM operations WHERE owner=? AND key=?').all(ownerAId, key),
+    reservation: mainDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerAId, key),
+    packet: mainDb.prepare('SELECT revision,body FROM cases WHERE id=?').get(caseA.id)
+  });
+  let dispatchFailureSnapshot;
+  try {
+    dispatchFailureSnapshot = mainMessageSnapshot(completionDispatchFailureKey);
+    assert.equal(dispatchFailureSnapshot.operation.length, 0, 'failed MCP dispatch creates no operation');
+    assert.equal(dispatchFailureSnapshot.reservation.length, 1, 'unknown MCP outcome preserves its reservation');
+    assert.match(dispatchFailureSnapshot.reservation[0].attempt_token, /^[a-f0-9]{32}$/);
+    assert.equal(dispatchFailureSnapshot.packet.revision, proofA.packet.revision);
+
+    const completionFailureReplay = await api('POST', messagePathA, ownerA, completionFailureBody);
+    assert.equal(completionFailureReplay.status, 409);
+    assert.equal(completionFailureReplay.json.error, 'MESSAGE_PENDING');
+    assert.equal(providerCalls, beforeCompletionFailure + 1,
+      'same-key replay of unknown MCP outcome does not extract again');
+    assert.deepEqual(mainMessageSnapshot(completionDispatchFailureKey), dispatchFailureSnapshot,
+      'same-key replay leaves pending reservation and case unchanged');
+
+    const lostResponseText = 'Morgan Bell confirmed the north gate volunteer shift.';
+    const lostResponseBody = {
+      expectedRevision: proofA.packet.revision,
+      idempotencyKey: lostCompletionResponseKey,
+      text: lostResponseText
+    };
+    const beforeLostResponse = providerCalls;
+    const lostResponse = await api('POST', messagePathA, ownerA, lostResponseBody);
+    assert.equal(lostResponse.status, 409);
+    assert.equal(lostResponse.json.error, 'MESSAGE_PENDING',
+      'the first HTTP response stays pending after the MCP completion reply is lost');
+    assert.equal(providerCalls, beforeLostResponse + 1, 'lost MCP response follows exactly one extraction');
+    assert.equal(await readFile(path.join(dataDir, 'completion-response-loss.injected'), 'utf8'),
+      'injected-after-response');
+
+    const committedBeforeReplay = mainMessageSnapshot(lostCompletionResponseKey);
+    assert.equal(committedBeforeReplay.operation.length, 1,
+      'the exact loopback MCP call committed before its response was discarded');
+    assert.equal(committedBeforeReplay.reservation.length, 0,
+      'committed completion consumed its reservation');
+    assert.equal(committedBeforeReplay.packet.revision, proofA.packet.revision + 1);
+
+    const completedReplay = await api('POST', messagePathA, ownerA, lostResponseBody);
+    assert.equal(completedReplay.status, 200, 'same-key replay discovers the durable completion');
+    const completedPacket = completedReplay.json.packet;
+    assert.equal(completedPacket.revision, proofA.packet.revision + 1);
+    assert.equal(completedPacket.facts.name.value, 'Morgan Bell');
+    assert.equal(completedPacket.sources.at(-1).text, lostResponseText);
+    const factEvidence = completedPacket.facts.name.evidence;
+    const factSource = completedPacket.sources.find(source => source.id === factEvidence.sourceId);
+    assert.ok(factSource);
+    assert.equal(factSource.text.slice(factEvidence.start, factEvidence.end), 'Morgan Bell');
+    assert.equal(providerCalls, beforeLostResponse + 1,
+      'completed same-key replay adds no provider extraction');
+    assert.deepEqual(mainMessageSnapshot(lostCompletionResponseKey), committedBeforeReplay,
+      'completed replay leaves the committed operation and case stable');
+  } finally {
+    mainDb.close();
+  }
+
   releaseHeld();
   const adapterResult = await verifyAdapterCompletion();
   const result = {
     schema: 'paperpath-message-single-flight-test-v1', result: 'PASS',
-    providerEndpointGuarded: true, providerCalls: 3,
+    providerEndpointGuarded: true, providerCalls: 5,
     firstWaveCalls: 2, ownerIsolation: true, identicalDedup: true, changedPayload409: true,
     committedReplayNoProviderCall: true, unknownFailureRemainsPendingWithoutRetry: true,
+    completionMcpFailureLeavesReservationPendingWithoutRetry: true,
+    lostCompletionResponseReplayDiscoversCommitWithoutRetry: true,
     sourceEvidenceVerifiedForBothOwners: true,
     mcpAdapterCompletion: adapterResult
   };
