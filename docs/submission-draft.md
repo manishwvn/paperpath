@@ -1,6 +1,6 @@
 # Submission draft — not recorded or submitted
 
-Draft based on the local Chrome/PDF receipt at source `47e59cb1f63e54a0bbaa0c42f502bb3b7494c3b2` (`.local/evidence/runner-release/ui-public-origin-47e59/receipt.json`), PR #11, and the current public README. Treat every field marked **Not verified** as unfinished. This draft is not a claim that the entry is eligible, hosted, or available to judges.
+Draft based on the local Chrome/PDF journey at source `47e59cb1f63e54a0bbaa0c42f502bb3b7494c3b2`, PR #11, and the current public README. The detailed local receipt and synthetic runtime artifacts are not public deliverables. Treat every field marked **Not verified** as unfinished. This draft is not a claim that the entry is eligible, hosted, or available to judges.
 
 ## Proposed Devpost fields
 
