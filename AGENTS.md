@@ -4,6 +4,12 @@
 
 PaperPath is a fictional community-volunteer application simulator. It is not connected to Alexa+ and does not submit applications to a real organization. Keep the interface and README clear about this. The project remains in development until all release gates in `docs/contracts.md` and the project plan have current evidence.
 
+## Current execution override (October 16, 2026)
+
+Luna is the primary coding route: low for orchestration/CLI/checks/checkpoints, high for bounded implementation, xhigh for complex integration/concurrency/persistence/recovery. Edit directly in an owned isolated worktree. Do not run OpenCode model admission/races, proposal-only JSON, custom coding harnesses, or per-task Sol pre-review; older root-plan instructions are superseded. Implement, run meaningful affected checks, repair findings, and present integrated diff plus receipts for independent Sol review at a coherent milestone. No routine root approval loop. Preserve $0, containment, security, branch, CI, and release gates below.
+
+At each checkpoint lead with the end-to-end milestone completed (or explicitly not completed), tested source SHA, observed checks/evidence, and remaining mandatory end-to-end/release gates. Keep component progress separate from release readiness; never present a percentage as readiness.
+
 ## Local development and data
 
 - Use Node.js 24.6.0 (`.node-version`). Run `npm ci`, `npm test`, `npm run typecheck`, `npm run lint`, and `npm run build` as appropriate for each change.
