@@ -13,11 +13,13 @@ import { Store, DomainError, candidateSchema, fields, validatePacket } from './d
 import type { Case } from './domain.ts';
 import { formNames, prepareExport } from './pdf.ts';
 import { extractCandidates, getExtractionOutcome } from './inference.ts';
+import { configureOrigins } from './origins.ts';
 import type { Request, Response, NextFunction } from 'express';
 
 process.umask(0o077);
 const port = Number(process.env.PORT ?? '4317');
 if (!Number.isInteger(port) || port<1024 || port>65535) throw new Error('INVALID_PORT');
+const originConfig = configureOrigins(process.env.PAPERPATH_PUBLIC_ORIGINS,port);
 const runtime = resolve(process.env.PAPERPATH_DATA_DIR ?? '.local');
 await mkdir(runtime,{recursive:true,mode:0o700});
 const secretPath = join(runtime,'service-secret.txt');
@@ -26,10 +28,11 @@ catch (error) { if ((error as NodeJS.ErrnoException).code!=='EEXIST') throw erro
 const secret = (await readFile(secretPath,'utf8')).trim();
 const store = new Store(join(runtime,'paperpath.sqlite'));
 const base = `http://127.0.0.1:${port}`;
-const origins = new Set([base,`http://localhost:${port}`]);
+const { origins, publicOrigins, authorities, hostnames, originAuthorities } = originConfig;
+const secureAuthorities = new Set([...publicOrigins].map(origin => new URL(origin).host));
 const model = process.env.GROQ_MODEL ?? 'openai/gpt-oss-20b';
 const approvals = new Map<string,{owner:string;id:string;revision:number}>();
-const app = createMcpExpressApp({host:'127.0.0.1'});
+const app = createMcpExpressApp({host:'127.0.0.1',allowedHosts:[...hostnames]});
 const equal = (a:string,b:string) => {
   const left = Buffer.from(a), right = Buffer.from(b);
   return left.length===right.length && timingSafeEqual(left,right);
@@ -39,7 +42,10 @@ const uuid = z.string().uuid();
 const mutation = z.object({expectedRevision:z.number().int().positive(),idempotencyKey:z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/)});
 
 app.use((req,res,next)=>{
-  if (!origins.has(`http://${req.headers.host}`) || (req.headers.origin && !origins.has(req.headers.origin))) {
+  const authority = req.headers.host ?? '';
+  const origin = req.headers.origin;
+  if (!authorities.has(authority) || (origin !== undefined &&
+      (!origins.has(origin) || originAuthorities.get(origin)!==authority))) {
     return res.status(403).json({error:'INVALID_ORIGIN_OR_HOST'});
   }
   res.setHeader('X-Content-Type-Options','nosniff');
@@ -146,7 +152,7 @@ app.use('/api',(req,res,next)=>{
   const owner = store.session(cookie);
   res.locals.owner = owner;
   res.setHeader('Cache-Control','no-store');
-  if (cookie!==owner) res.cookie('paperpath_session',owner,{httpOnly:true,sameSite:'strict',maxAge:90*24*60*60*1000,path:'/'});
+  if (cookie!==owner) res.cookie('paperpath_session',owner,{httpOnly:true,sameSite:'strict',secure:secureAuthorities.has(req.get('Host')??''),maxAge:90*24*60*60*1000,path:'/'});
   if (!['GET','HEAD'].includes(req.method)) {
     if (!req.headers.origin || !origins.has(req.headers.origin) || !equal(req.get('X-PaperPath-CSRF')??'',csrf(owner))) {
       return res.status(403).json({error:'BROWSER_AUTH_REQUIRED'});
