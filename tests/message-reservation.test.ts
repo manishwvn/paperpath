@@ -618,9 +618,10 @@ test('release and reacquire require exact binding and fresh token',{timeout:1000
 const f=await reservationFixture();
 try {
 const observer=observeReservation(f);
-const release=(x:Partial<{owner:string;id:string;rev:number;key:string;text:string;token:string;outcome:string}>={})=>f.store.releaseMessage(x.owner??f.owner,x.id??f.packet.id,x.rev??f.packet.revision,x.key??f.key,x.text??f.text,x.token??f.token,(x.outcome??'not-started') as 'not-started'|'definitively-failed');
+const release=(x:Partial<{owner:string;id:string;rev:number;key:string;text:string;token:string;outcome:string}>={})=>f.store.releaseMessage(x.owner??f.owner,x.id??f.packet.id,x.rev??f.packet.revision,x.key??f.key,x.text??f.text,x.token??f.token,(x.outcome??'not-started') as 'not-started');
 const complete=(token=f.token)=>f.store.completeMessage(f.owner,f.packet.id,f.packet.revision,f.key,f.text,token,completeCandidates);
 assertUnchanged(observer,()=>release({outcome:'timeout'}),'INVALID_MESSAGE_OUTCOME');
+assertUnchanged(observer,()=>release({outcome:'definitively-failed'}),'INVALID_MESSAGE_OUTCOME');
 for(const token of ['', 'bad', 'A'.repeat(32)]) {
 assertUnchanged(observer,()=>release({token}));
 assertUnchanged(observer,()=>complete(token));
@@ -638,7 +639,7 @@ const fp=String(f.store.db.prepare('SELECT fingerprint FROM message_reservations
 f.store.db.prepare('UPDATE message_reservations SET fingerprint=? WHERE owner=? AND key=?').run('bad',f.owner,f.key);
 assertUnchanged(observer,()=>release());
 f.store.db.prepare('UPDATE message_reservations SET fingerprint=? WHERE owner=? AND key=?').run(fp,f.owner,f.key);
-release({outcome:'definitively-failed'});
+release({outcome:'not-started'});
 assert.equal(String(f.store.db.prepare('SELECT attempt_token FROM message_reservations WHERE owner=? AND key=?').get(f.owner,f.key)?.attempt_token),'');
 assertUnchanged(observer,()=>complete());
 assertUnchanged(observer,()=>complete(''));

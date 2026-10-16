@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 const helperPath = fileURLToPath(new URL('./helpers/message-single-flight-verify.mjs', import.meta.url));
 
-test('message requests are single-flight, owner-scoped, and retryable over HTTP and MCP', async (t) => {
+test('message requests preserve owner-scoped replay and pending behavior over HTTP and MCP', async (t) => {
   const child = spawn(process.execPath, ['--experimental-strip-types', helperPath], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8' },
@@ -40,12 +40,17 @@ test('message requests are single-flight, owner-scoped, and retryable over HTTP 
   assert.equal(result.schema, 'paperpath-message-single-flight-test-v1');
   assert.equal(result.result, 'PASS');
   assert.equal(result.providerEndpointGuarded, true);
-  assert.equal(result.providerCalls, 4);
+  assert.equal(result.providerCalls, 6);
   assert.equal(result.firstWaveCalls, 2);
   assert.equal(result.ownerIsolation, true);
   assert.equal(result.identicalDedup, true);
   assert.equal(result.changedPayload409, true);
   assert.equal(result.committedReplayNoProviderCall, true);
-  assert.equal(result.failure503AndSameKeyRetry200, true);
+  assert.equal(result.unknownFailureRemainsPendingWithoutRetry, true);
+  assert.equal(result.completionMcpFailureLeavesReservationPendingWithoutRetry, true);
+  assert.equal(result.lostCompletionResponseReplayDiscoversCommitWithoutRetry, true);
+  assert.equal(result.midflightProcessCrashRemainsPendingWithoutRetry, true);
+  const adapterResult = result.mcpAdapterCompletion as Record<string, unknown>;
+  assert.equal(adapterResult.restartPendingReservationKeepsAttemptToken, true);
   assert.equal(result.sourceEvidenceVerifiedForBothOwners, true);
 });

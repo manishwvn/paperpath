@@ -62,6 +62,7 @@ export async function extractCandidates(text: string, candidateJsonSchema: unkno
     response = await fetcher('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      redirect: 'error',
       signal,
       body
     });

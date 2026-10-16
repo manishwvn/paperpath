@@ -200,14 +200,14 @@ export class Store {
     }
   }
   releaseMessage(owner: string, caseId: string, expectedRevision: number, key: string, text: string,
-    attemptToken: string, outcome: 'not-started' | 'definitively-failed'): void {
+    attemptToken: string, outcome: 'not-started'): void {
     if (!this.sessionExists(owner)) throw new DomainError('SESSION_NOT_FOUND');
     if (!/^[a-zA-Z0-9_-]{8,100}$/.test(key)) throw new DomainError('INVALID_IDEMPOTENCY_KEY');
     const fingerprint = hash(JSON.stringify({ id:caseId,revision:expectedRevision,text }));
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (this.db.prepare('SELECT 1 FROM operations WHERE owner=? AND key=?').get(owner,key)) throw new DomainError('IDEMPOTENCY_CONFLICT');
-      if (outcome !== 'not-started' && outcome !== 'definitively-failed') throw new DomainError('INVALID_MESSAGE_OUTCOME');
+      if (outcome !== 'not-started') throw new DomainError('INVALID_MESSAGE_OUTCOME');
       if (typeof attemptToken !== 'string' || !/^[a-f0-9]{32}$/.test(attemptToken)) throw new DomainError('IDEMPOTENCY_CONFLICT');
       const reservation = this.db.prepare('SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token FROM message_reservations WHERE owner=? AND key=?').get(owner,key);
       if (!reservation || String(reservation.owner) !== owner || String(reservation.key) !== key ||
