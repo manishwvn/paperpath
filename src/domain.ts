@@ -155,40 +155,73 @@ export class Store {
       const prior = this.db.prepare('SELECT payload_hash,result FROM operations WHERE owner=? AND key=?').get(owner,key);
       if (prior) {
         let raw: unknown;
-        try {
-          raw = JSON.parse(String(prior.result));
-        } catch {
-          throw new DomainError('IDEMPOTENCY_CONFLICT');
-        }
+        try { raw = JSON.parse(String(prior.result)); }
+        catch { throw new DomainError('IDEMPOTENCY_CONFLICT'); }
         if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new DomainError('IDEMPOTENCY_CONFLICT');
         const packet = raw as { id: unknown; revision: unknown; audit: unknown; sources: unknown };
-        if (packet.id !== caseId || packet.revision !== expectedRevision + 1) throw new DomainError('IDEMPOTENCY_CONFLICT');
-        if (!Array.isArray(packet.audit) || !Array.isArray(packet.sources)) throw new DomainError('IDEMPOTENCY_CONFLICT');
-        const lastAudit: unknown = packet.audit.at(-1);
-        const lastSource: unknown = packet.sources.at(-1);
-        if (typeof lastAudit !== 'object' || lastAudit === null || Array.isArray(lastAudit)) throw new DomainError('IDEMPOTENCY_CONFLICT');
-        if (typeof lastSource !== 'object' || lastSource === null || Array.isArray(lastSource)) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        if (packet.id !== caseId || packet.revision !== expectedRevision + 1 || !Array.isArray(packet.audit) || !Array.isArray(packet.sources)) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        const lastAudit: unknown = packet.audit.at(-1), lastSource: unknown = packet.sources.at(-1);
+        if (typeof lastAudit !== 'object' || lastAudit === null || Array.isArray(lastAudit) ||
+          typeof lastSource !== 'object' || lastSource === null || Array.isArray(lastSource)) throw new DomainError('IDEMPOTENCY_CONFLICT');
         const source = lastSource as { text: unknown; sha256: unknown };
-        if ((lastAudit as { action: unknown }).action !== 'propose' ||
-          typeof source.text !== 'string' || source.text !== text ||
-          typeof source.sha256 !== 'string' || source.sha256 !== hash(text)) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        if ((lastAudit as { action: unknown }).action !== 'propose' || typeof source.text !== 'string' ||
+          source.text !== text || typeof source.sha256 !== 'string' || source.sha256 !== hash(text)) throw new DomainError('IDEMPOTENCY_CONFLICT');
         const current = this.get(owner, caseId);
         this.db.exec('COMMIT');
         return { state: 'completed', packet: current };
       }
-      const existing = this.db.prepare('SELECT case_id,expected_revision,source_text,fingerprint FROM message_reservations WHERE owner=? AND key=?').get(owner,key);
+      const existing = this.db.prepare('SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token FROM message_reservations WHERE owner=? AND key=?').get(owner,key);
       if (existing) {
-        if (String(existing.case_id) !== caseId || Number(existing.expected_revision) !== expectedRevision || String(existing.source_text) !== text || String(existing.fingerprint) !== fingerprint) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        if (String(existing.owner) !== owner || String(existing.key) !== key || String(existing.case_id) !== caseId ||
+          Number(existing.expected_revision) !== expectedRevision || String(existing.source_text) !== text ||
+          String(existing.fingerprint) !== fingerprint) throw new DomainError('IDEMPOTENCY_CONFLICT');
+        if (String(existing.attempt_token) !== '') {
+          this.db.exec('COMMIT');
+          return { state: 'pending', acquired: false };
+        }
+        const current = this.get(owner, caseId);
+        if (current.revision !== expectedRevision) throw new DomainError('STALE_REVISION');
+        const attemptToken = randomBytes(16).toString('hex');
+        const replaced = this.db.prepare("UPDATE message_reservations SET attempt_token=? WHERE owner=? AND key=? AND case_id=? AND expected_revision=? AND source_text=? AND fingerprint=? AND attempt_token=''")
+          .run(attemptToken,owner,key,caseId,expectedRevision,text,fingerprint);
+        if (replaced.changes !== 1) throw new DomainError('IDEMPOTENCY_CONFLICT');
         this.db.exec('COMMIT');
-        return { state: 'pending', acquired: false };
+        return { state: 'pending', acquired: true, attemptToken };
       }
       const current = this.get(owner, caseId);
       if (current.revision !== expectedRevision) throw new DomainError('STALE_REVISION');
-      const attemptToken = randomBytes(16).toString('hex');
-      const createdAt = new Date().toISOString();
+      const attemptToken = randomBytes(16).toString('hex'), createdAt = new Date().toISOString();
       this.db.prepare('INSERT INTO message_reservations VALUES (?,?,?,?,?,?,?,?)').run(owner,key,caseId,expectedRevision,text,fingerprint,attemptToken,createdAt);
       this.db.exec('COMMIT');
       return { state: 'pending', acquired: true, attemptToken };
+    } catch (error) {
+      if (this.db.isTransaction) this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  releaseMessage(owner: string, caseId: string, expectedRevision: number, key: string, text: string,
+    attemptToken: string, outcome: 'not-started' | 'definitively-failed'): void {
+    if (!this.sessionExists(owner)) throw new DomainError('SESSION_NOT_FOUND');
+    if (!/^[a-zA-Z0-9_-]{8,100}$/.test(key)) throw new DomainError('INVALID_IDEMPOTENCY_KEY');
+    const fingerprint = hash(JSON.stringify({ id:caseId,revision:expectedRevision,text }));
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (this.db.prepare('SELECT 1 FROM operations WHERE owner=? AND key=?').get(owner,key)) throw new DomainError('IDEMPOTENCY_CONFLICT');
+      if (outcome !== 'not-started' && outcome !== 'definitively-failed') throw new DomainError('INVALID_MESSAGE_OUTCOME');
+      if (typeof attemptToken !== 'string' || !/^[a-f0-9]{32}$/.test(attemptToken)) throw new DomainError('IDEMPOTENCY_CONFLICT');
+      const reservation = this.db.prepare('SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token FROM message_reservations WHERE owner=? AND key=?').get(owner,key);
+      if (!reservation || String(reservation.owner) !== owner || String(reservation.key) !== key ||
+        String(reservation.case_id) !== caseId || Number(reservation.expected_revision) !== expectedRevision ||
+        String(reservation.source_text) !== text || String(reservation.fingerprint) !== fingerprint ||
+        !/^[a-f0-9]{32}$/.test(String(reservation.attempt_token)) || String(reservation.attempt_token) !== attemptToken) {
+        throw new DomainError('IDEMPOTENCY_CONFLICT');
+      }
+      const current = this.get(owner,caseId);
+      if (current.revision !== expectedRevision) throw new DomainError('STALE_REVISION');
+      const released = this.db.prepare("UPDATE message_reservations SET attempt_token='' WHERE owner=? AND key=? AND case_id=? AND expected_revision=? AND source_text=? AND fingerprint=? AND attempt_token=?")
+        .run(owner,key,caseId,expectedRevision,text,fingerprint,attemptToken);
+      if (released.changes !== 1) throw new DomainError('IDEMPOTENCY_CONFLICT');
+      this.db.exec('COMMIT');
     } catch (error) {
       if (this.db.isTransaction) this.db.exec('ROLLBACK');
       throw error;
@@ -278,6 +311,7 @@ export class Store {
     try {
       const prior = this.db.prepare('SELECT 1 FROM operations WHERE owner=? AND key=?').get(owner,key);
       if (prior) throw new DomainError('IDEMPOTENCY_CONFLICT');
+      if (typeof attemptToken !== 'string' || !/^[a-f0-9]{32}$/.test(attemptToken)) throw new DomainError('IDEMPOTENCY_CONFLICT');
       const reservation = this.db.prepare('SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token FROM message_reservations WHERE owner=? AND key=?').get(owner,key);
       const fingerprint = hash(JSON.stringify({ id:caseId,revision:expectedRevision,text }));
       if (!reservation || String(reservation.owner) !== owner || String(reservation.key) !== key ||
