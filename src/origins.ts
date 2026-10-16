@@ -26,6 +26,9 @@ export function configureOrigins(raw: string | undefined, port: number): OriginC
         value.includes('*') || /\s/.test(value) || parsed.pathname !== '/' || parsed.search || parsed.hash) {
       throw new Error('INVALID_PUBLIC_ORIGINS');
     }
+    if (parsed.host === `localhost:${port}` || parsed.host === `127.0.0.1:${port}`) {
+      throw new Error('INVALID_PUBLIC_ORIGINS');
+    }
     publicOrigins.add(value);
   }
 
