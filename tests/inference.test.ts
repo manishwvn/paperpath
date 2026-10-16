@@ -246,8 +246,10 @@ test('valid response returns candidates unchanged', async () => {
   const valid = findValidCandidate();
   const expected = [valid];
   let calls = 0;
-  const fetcher = (async () => {
+  const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
     calls += 1;
+    assert.equal(String(input), 'https://api.groq.com/openai/v1/chat/completions');
+    assert.equal(init?.redirect, 'error', 'provider redirects are rejected');
     return okResponse(expected);
   }) as unknown as typeof fetch;
   const result = await extractCandidates(MESSAGE, {}, { key: KEY, model: MODEL, fetcher });

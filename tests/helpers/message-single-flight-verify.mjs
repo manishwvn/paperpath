@@ -390,6 +390,35 @@ async function verifyAdapterCompletion() {
       reservations: snapshotDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerAId, messageKey)
     });
 
+    const pendingHttp = await adapterApi('POST', '/api/cases/' + packet.id + '/message', ownerA, {
+      expectedRevision: packet.revision, idempotencyKey: messageKey, text: sourceText
+    });
+    assert.equal(pendingHttp.status, 409, 'an already acquired reservation is reported pending');
+    assert.equal(pendingHttp.json.error, 'MESSAGE_PENDING');
+    assert.equal(providerCalls, priorProviderCalls, 'a pending reservation does not invoke extraction');
+    assert.equal(snapshot().reservations[0]?.attempt_token, attemptToken,
+      'pending HTTP request leaves the original server token unchanged');
+
+    const noKeyMessageKey = 'msg_' + randomUUID();
+    const noKeyMessageText = 'Morgan Bell prefers Saturday shifts.';
+    const notStarted = await adapterApi('POST', '/api/cases/' + packet.id + '/message', ownerA, {
+      expectedRevision: packet.revision, idempotencyKey: noKeyMessageKey, text: noKeyMessageText
+    });
+    assert.equal(notStarted.status, 503);
+    assert.equal(notStarted.json.error, 'GROQ_KEY_REQUIRED');
+    const releasedReservation = snapshotDb.prepare('SELECT attempt_token FROM message_reservations WHERE owner=? AND key=?')
+      .get(ownerAId, noKeyMessageKey);
+    assert.equal(releasedReservation?.attempt_token, '', 'known not-started extraction releases the reservation');
+    assert.equal(JSON.stringify(notStarted).includes(attemptToken), false, 'HTTP error omits the server attempt token');
+    const notStartedRetry = await adapterApi('POST', '/api/cases/' + packet.id + '/message', ownerA, {
+      expectedRevision: packet.revision, idempotencyKey: noKeyMessageKey, text: noKeyMessageText
+    });
+    assert.equal(notStartedRetry.status, 503);
+    assert.equal(notStartedRetry.json.error, 'GROQ_KEY_REQUIRED');
+    assert.equal(snapshotDb.prepare('SELECT attempt_token FROM message_reservations WHERE owner=? AND key=?')
+      .get(ownerAId, noKeyMessageKey)?.attempt_token, '', 'known not-started retry releases its new token');
+    assert.equal(providerCalls, priorProviderCalls, 'missing credentials never reach the provider mock');
+
     async function withAdapterMcp(session, action) {
       const client = new Client({ name: 'PaperPath adapter proof', version: '0.1.0' });
       const owner = session.cookie.slice('paperpath_session='.length);
@@ -517,7 +546,8 @@ async function verifyAdapterCompletion() {
       fiveRejectionsIncludingUnknownFieldLeaveRowsUnchanged: true,
       unknownFieldRejectedWithoutMutation: true, repeatAddsNoOperationOrSource: true,
       proposeFactsSchemaRetained: true, tokenAbsentFromResultsAndLogs: true,
-      correctedHttpReplayWithoutProvider: true, providerCredentialAbsent: true
+      correctedHttpReplayWithoutProvider: true, providerCredentialAbsent: true,
+      pendingHttpReservationIsNotReinferred: true, knownNotStartedReservationIsReleased: true
     };
   } finally {
     const cleanupComplete = await cleanupAdapter();
@@ -637,21 +667,21 @@ try {
   const beforeFailure = providerCalls;
   failNext = true;
   const failed = await api('POST', messagePathA, ownerA, failBody);
-  assert.equal(failed.status, 503);
+  assert.equal(failed.status, 409);
+  assert.equal(failed.json.error, 'MESSAGE_PENDING');
   assert.equal(providerCalls, beforeFailure + 1, 'provider failure uses exactly one call');
   const retry = await api('POST', messagePathA, ownerA, failBody);
-  assert.equal(retry.status, 200);
-  assert.equal(providerCalls, beforeFailure + 2, 'retry uses exactly one additional provider call');
-  assert.equal(retry.json.packet.revision, proofA.packet.revision + 1);
-  assert.equal(retry.json.packet.facts.name.value, 'Morgan Bell');
+  assert.equal(retry.status, 409);
+  assert.equal(retry.json.error, 'MESSAGE_PENDING');
+  assert.equal(providerCalls, beforeFailure + 1, 'unknown provider outcome stays pending without another call');
 
   releaseHeld();
   const adapterResult = await verifyAdapterCompletion();
   const result = {
     schema: 'paperpath-message-single-flight-test-v1', result: 'PASS',
-    providerEndpointGuarded: true, providerCalls: 4,
+    providerEndpointGuarded: true, providerCalls: 3,
     firstWaveCalls: 2, ownerIsolation: true, identicalDedup: true, changedPayload409: true,
-    committedReplayNoProviderCall: true, failure503AndSameKeyRetry200: true,
+    committedReplayNoProviderCall: true, unknownFailureRemainsPendingWithoutRetry: true,
     sourceEvidenceVerifiedForBothOwners: true,
     mcpAdapterCompletion: adapterResult
   };

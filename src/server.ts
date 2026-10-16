@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { Store, DomainError, candidateSchema, fields, validatePacket } from './domain.ts';
 import type { Case } from './domain.ts';
 import { formNames, prepareExport } from './pdf.ts';
-import { extractCandidates } from './inference.ts';
+import { extractCandidates, getExtractionOutcome } from './inference.ts';
 import type { Request, Response, NextFunction } from 'express';
 
 process.umask(0o077);
@@ -185,21 +185,33 @@ app.post('/api/cases/:caseId/message',async(req,res)=>{
     res.json(state(packet));
     return;
   }
-  const task = withMcp(res.locals.owner,async client=>{
-    if (store.committedMessage(res.locals.owner,caseId,args.expectedRevision,args.idempotencyKey,args.text)) {
-      return call<Case>(client,'get_case',{caseId});
+  const task = (async()=>{
+    const reservation = store.reserveMessage(res.locals.owner,caseId,args.expectedRevision,args.idempotencyKey,args.text);
+    if (reservation.state==='completed') return reservation.packet;
+    if (!reservation.acquired) throw new DomainError('MESSAGE_PENDING');
+
+    let extractionAttempted = false;
+    try {
+      return await withMcp(res.locals.owner,async client=>{
+        const listed = await client.listTools();
+        const proposal = listed.tools.find(tool=>tool.name==='propose_facts');
+        const candidatesSchema = proposal?.inputSchema.properties?.candidates;
+        if (!candidatesSchema) throw new DomainError('MCP_SCHEMA_UNAVAILABLE');
+        extractionAttempted = true;
+        const candidates = await extractCandidates(args.text,candidatesSchema,{key:process.env.GROQ_API_KEY,model});
+        await call<Case>(client,'complete_message',{caseId,expectedRevision:args.expectedRevision,
+          idempotencyKey:args.idempotencyKey,sourceText:args.text,attemptToken:reservation.attemptToken,candidates});
+        return call<Case>(client,'get_case',{caseId});
+      });
+    } catch (error) {
+      if (!extractionAttempted || getExtractionOutcome(error)==='not-started') {
+        store.releaseMessage(res.locals.owner,caseId,args.expectedRevision,args.idempotencyKey,args.text,
+          reservation.attemptToken,'not-started');
+        throw error;
+      }
+      throw new DomainError('MESSAGE_PENDING');
     }
-    const existing = await call<Case>(client,'get_case',{caseId});
-    if (existing.revision!==args.expectedRevision) throw new DomainError('STALE_REVISION');
-    const listed = await client.listTools();
-    const proposal = listed.tools.find(tool=>tool.name==='propose_facts');
-    const candidatesSchema = proposal?.inputSchema.properties?.candidates;
-    if (!candidatesSchema) throw new DomainError('MCP_SCHEMA_UNAVAILABLE');
-    const candidates = await extractCandidates(args.text,candidatesSchema,{key:process.env.GROQ_API_KEY,model});
-    await call<Case>(client,'propose_facts',{caseId,expectedRevision:args.expectedRevision,
-      idempotencyKey:args.idempotencyKey,sourceText:args.text,candidates});
-    return call<Case>(client,'get_case',{caseId});
-  });
+  })();
   task.catch(()=>{});
   messageInflight.set(inflightKey,{fingerprint,promise:task});
   try {
@@ -252,7 +264,7 @@ app.use(express.static(fileURLToPath(new URL('../dist/frontend/',import.meta.url
 app.use((error:unknown,_req:Request,res:Response,_next:NextFunction)=>{
   void _next;
   const code = error instanceof DomainError?error.code:error instanceof z.ZodError?'INVALID_INPUT':'INTERNAL_ERROR';
-  const status = /STALE|CONFLICT/.test(code)?409:/NOT_FOUND/.test(code)?404:/PROVIDER|GROQ/.test(code)?503:code==='INTERNAL_ERROR'?500:400;
+  const status = /STALE|CONFLICT|PENDING/.test(code)?409:/NOT_FOUND/.test(code)?404:/PROVIDER|GROQ/.test(code)?503:code==='INTERNAL_ERROR'?500:400;
   res.status(status).json({error:code});
 });
 const http = app.listen(port,'127.0.0.1',()=>console.log(`PaperPath listening at ${base}`));
