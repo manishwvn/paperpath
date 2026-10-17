@@ -38,3 +38,5 @@ npm run build
 ```
 
 The app can still be used for manual fact corrections and PDF exports when the optional inference provider is unavailable. Text sent for provider analysis leaves the local app; do not enter real applicant data in this practice simulator. See [`docs/contracts.md`](docs/contracts.md) for the application contract and verification limits.
+
+For a key-free, synthetic walkthrough from case creation through confirmation and both PDF downloads, follow the [local evaluator guide](docs/evaluation.md).
