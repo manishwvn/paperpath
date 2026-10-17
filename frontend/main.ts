@@ -251,7 +251,6 @@ function updateButtons(): void {
   const input = $('case-id-input');
   const inputVal = input instanceof HTMLInputElement ? input.value.trim() : '';
   if (resBtn instanceof HTMLButtonElement) resBtn.disabled = busy || inputVal === '';
-  if (!providerReady) setStatus('Provider is not ready. You can still correct facts manually and export the current draft.');
 }
 function setBusy(on: boolean): void {
   busy = on;
@@ -563,6 +562,8 @@ async function init(): Promise<void> {
   } catch {
     providerReady = false;
   }
+  const providerNotice = $('provider-notice');
+  if (providerNotice) providerNotice.hidden = providerReady;
   try {
     const listed = await listCases();
     void listed;
@@ -602,8 +603,9 @@ async function init(): Promise<void> {
     e.preventDefault();
     void doSend();
   });
-  const corBtn = $('correction-availability-apply');
-  if (corBtn) corBtn.addEventListener('click', () => {
+  const corForm = $('correction-form');
+  if (corForm) corForm.addEventListener('submit', (e) => {
+    e.preventDefault();
     void doCorrect();
   });
   const chk = $('facts-confirm-checkbox');

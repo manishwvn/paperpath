@@ -24,7 +24,7 @@ Open <http://127.0.0.1:4317>. Keep the server terminal open while using the app.
    | Name | Nora Grey |
    | Email | nora@example.test |
    | Availability | Thursdays |
-   | Equipment | Yes equipment needed |
+   | Equipment | Needed |
    | Motivation | I want to help the community. |
 
 3. Change **Availability** to `Wednesdays` and apply the shared availability correction. Confirm the packet review shows `Wednesdays` in both the volunteer application and the availability/equipment request previews.
