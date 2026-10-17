@@ -37,6 +37,7 @@
 <h2 id="conversation-heading">Conversation</h2>
 <p>Ask questions in your own words. Case data is stored by the locally running PaperPath server on this computer. Text submitted for analysis is sent to Groq to suggest draft facts for review.</p>
 <div id="status-message" role="status" aria-live="polite">Welcome. API state is not loaded yet. Controls stay disabled until the next step enables them.</div>
+<p id="provider-notice" role="status" aria-live="polite" hidden>Provider is not ready. You can still correct facts manually and export the current draft.</p>
 <div id="error-message" role="alert"></div>
 <section aria-labelledby="message-history-heading">
 <h3 id="message-history-heading">Messages</h3>
@@ -78,7 +79,7 @@
 <option value="false">Not needed</option>
 </select>
 </div>
-<button type="button" id="correction-availability-apply" disabled>Apply shared availability correction</button>
+<button type="submit" id="correction-availability-apply" disabled>Apply shared availability correction</button>
 </form>
 </section>
 <section aria-labelledby="confirmation-heading">

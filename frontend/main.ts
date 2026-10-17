@@ -251,7 +251,6 @@ function updateButtons(): void {
   const input = $('case-id-input');
   const inputVal = input instanceof HTMLInputElement ? input.value.trim() : '';
   if (resBtn instanceof HTMLButtonElement) resBtn.disabled = busy || inputVal === '';
-  if (!providerReady) setStatus('Provider is not ready. You can still correct facts manually and export the current draft.');
 }
 function setBusy(on: boolean): void {
   busy = on;
@@ -413,6 +412,7 @@ async function doSend(): Promise<void> {
       if (input && input.value === t) input.value = '';
       setStatus('Message saved at revision ' + String(revision) + '.');
     } catch (e) {
+      setStatus('Message request needs attention. Review the error for next steps.');
       if (e instanceof ApiError && e.code === 'STALE_REVISION') {
         try {
           await refreshCase();
@@ -461,6 +461,7 @@ async function doCorrect(): Promise<void> {
       applyPacket(res, changed);
       setStatus('Correction for ' + field + ' saved at revision ' + String(revision) + '.');
     } catch (e) {
+      setStatus('Correction request needs attention. Review the error for next steps.');
       if (e instanceof ApiError && e.code === 'STALE_REVISION') {
         try {
           await refreshCase();
@@ -496,6 +497,7 @@ async function doConfirm(): Promise<void> {
       applyPacket(res, changed);
       setStatus('Confirmed for practice at revision ' + String(revision) + '.');
     } catch (e) {
+      setStatus('Confirmation request needs attention. Review the error for next steps.');
       if (e instanceof ApiError && e.code === 'STALE_REVISION') {
         try {
           await refreshCase();
@@ -540,6 +542,7 @@ async function doExport(): Promise<void> {
         setStatus('Export is not current. Review the packet and retry export.');
       }
     } catch (e) {
+      setStatus('Export request needs attention. Review the error for next steps.');
       if (e instanceof ApiError && e.code === 'STALE_REVISION') {
         try {
           await refreshCase();
@@ -563,6 +566,8 @@ async function init(): Promise<void> {
   } catch {
     providerReady = false;
   }
+  const providerNotice = $('provider-notice');
+  if (providerNotice) providerNotice.hidden = providerReady;
   try {
     const listed = await listCases();
     void listed;
@@ -602,8 +607,9 @@ async function init(): Promise<void> {
     e.preventDefault();
     void doSend();
   });
-  const corBtn = $('correction-availability-apply');
-  if (corBtn) corBtn.addEventListener('click', () => {
+  const corForm = $('correction-form');
+  if (corForm) corForm.addEventListener('submit', (e) => {
+    e.preventDefault();
     void doCorrect();
   });
   const chk = $('facts-confirm-checkbox');

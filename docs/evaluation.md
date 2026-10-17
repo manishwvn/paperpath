@@ -2,9 +2,25 @@
 
 PaperPath is a practice simulator, not Amazon Alexa+, and it does not submit an application. Use fictional values only. This walkthrough needs no Groq key or public host. The server stores its local runtime data under the ignored `.local/` directory.
 
+## Check out the review candidate
+
+The default `main` branch is currently an older backend-only revision and does not contain this frontend journey. The [PR #14 candidate](https://github.com/manishwvn/paperpath/pull/14), on `codex/a11y-correction-status`, is under review. These steps pin tested code commit `229824f69b69689fae0fb621458fb435a630fe38`; a moving branch head may contain different code. This is a local review candidate, not a submission-ready release.
+
+From a directory where `paperpath-review` does not already exist:
+
+```sh
+git clone --no-checkout https://github.com/manishwvn/paperpath.git paperpath-review
+cd paperpath-review
+git fetch origin refs/pull/14/head
+git checkout --detach 229824f69b69689fae0fb621458fb435a630fe38
+git rev-parse HEAD
+```
+
+The last command must print `229824f69b69689fae0fb621458fb435a630fe38`. Fetching the PR makes its history available; the detached checkout selects the pinned code even if the PR head advances.
+
 ## Start the app without inference
 
-Use Node 24.6.0. In a terminal at the repository root:
+After the pinned checkout above, use Node 24.6.0. In the `paperpath-review` directory:
 
 ```sh
 npm ci
@@ -24,7 +40,7 @@ Open <http://127.0.0.1:4317>. Keep the server terminal open while using the app.
    | Name | Nora Grey |
    | Email | nora@example.test |
    | Availability | Thursdays |
-   | Equipment | Yes equipment needed |
+   | Equipment | Needed |
    | Motivation | I want to help the community. |
 
 3. Change **Availability** to `Wednesdays` and apply the shared availability correction. Confirm the packet review shows `Wednesdays` in both the volunteer application and the availability/equipment request previews.
@@ -36,4 +52,4 @@ Stop the local server with Ctrl+C when finished. Do not use real applicant infor
 
 ## What this guide verifies
 
-The synthetic integration test in [`tests/journey.test.ts`](../tests/journey.test.ts) exercises the local HTTP and MCP path, applies the corrected shared value, confirms the packet, generates both PDFs, downloads them, and checks their PDF structure and extracted text. The test uses no provider call. It does not assess browser layout, visual PDF rendering, public hosting, or judge access; those need separate evidence.
+The synthetic integration test in [`tests/journey.test.ts`](../tests/journey.test.ts) exercises the local HTTP and MCP path, applies the corrected shared value, confirms the packet, generates both PDFs, downloads them, and checks their PDF structure and extracted text. The test uses no provider call. It does not assess browser layout, keyboard submission, screen-reader announcements, visual PDF rendering, public hosting, or judge access; those need separate evidence. The PR #14 accessibility changes have not received browser keyboard or screen-reader runtime verification.
