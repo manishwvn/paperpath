@@ -17,7 +17,7 @@ const fetchGuard=fileURLToPath(new URL('./helpers/public-origin-fetch-guard.mjs'
 const formNames=['application','availability-equipment'] as const;
 type Response={status:number;headers:{get(name:string):string|null};bytes():Promise<Buffer>;json():Promise<unknown>};
 
-test('HTTP to MCP confirmation and export downloads two readable corrected PDFs',{timeout:30_000},async t=>{
+test('HTTP to MCP exports readable corrected PDFs and denies stale downloads after correction',{timeout:30_000},async t=>{
   const dataDir=await mkdtemp(join(tmpdir(),'paperpath-http-journey-'));
   const port=await freePort();
   const base=`http://127.0.0.1:${port}`;
@@ -33,18 +33,20 @@ test('HTTP to MCP confirmation and export downloads two readable corrected PDFs'
     exited=true;resolve({code,signal});
   }));
   const exportsDir=join(dataDir,'exports');
-  const exportState:{id?:string}={};
+  const exportIds:string[]=[];
   t.after(async()=>{
     if(!exited){child.kill('SIGTERM');await boundedExit(childExit,5_000);}
-    if(exportState.id){
+    if(exportIds.length>0){
       const children=await readdir(exportsDir);
-      assert.deepEqual(children,[exportState.id],'preserve unexpected export runtime artifacts');
-      const artifacts=join(exportsDir,exportState.id);
-      const names=(await readdir(artifacts)).sort();
-      assert.deepEqual(names,['application.pdf','availability-equipment.pdf','manifest.json'].sort(),
-        'preserve unexpected generated files');
-      for(const name of names) await unlink(join(artifacts,name));
-      await rmdir(artifacts);
+      assert.deepEqual(children.sort(),[...exportIds].sort(),'preserve unexpected export runtime artifacts');
+      for(const id of exportIds){
+        const artifacts=join(exportsDir,id);
+        const names=(await readdir(artifacts)).sort();
+        assert.deepEqual(names,['application.pdf','availability-equipment.pdf','manifest.json'].sort(),
+          'preserve unexpected generated files');
+        for(const name of names) await unlink(join(artifacts,name));
+        await rmdir(artifacts);
+      }
       await rmdir(exportsDir);
     }
     for(const name of ['service-secret.txt','paperpath.sqlite','paperpath.sqlite-wal','paperpath.sqlite-shm','mcp-events.jsonl']){
@@ -102,12 +104,14 @@ test('HTTP to MCP confirmation and export downloads two readable corrected PDFs'
   const exported=await requestApp(base,`${base}/api/cases/${created.id}/export`,{method:'POST',headers,
     body:{expectedRevision:confirmedPacket.revision,idempotencyKey:'http-journey-export-001'}});
   assert.equal(exported.status,200,await responseError(exported));
-  const manifest=(await exported.json() as {export:{id:string;status:string;artifacts:{name:string;sha256:string}[]}}).export;
-  exportState.id=manifest.id;
+  const manifest=(await exported.json() as {export:{id:string;revision:number;status:string;artifacts:{name:string;sha256:string}[]}}).export;
+  exportIds.push(manifest.id);
+  assert.equal(manifest.revision,confirmedPacket.revision);
   assert.equal(manifest.status,'Applicant-confirmed');
   assert.deepEqual(manifest.artifacts.map(item=>item.name).sort(),[...formNames].sort());
-  for(const form of formNames){
-    const downloaded=await requestApp(base,`${base}/api/cases/${created.id}/exports/${exportState.id}/${form}`,{headers:{Cookie:cookie}});
+  const originalDownloads=formNames.map(form=>({form,url:`${base}/api/cases/${created.id}/exports/${manifest.id}/${form}`}));
+  for(const {form,url} of originalDownloads){
+    const downloaded=await requestApp(base,url,{headers:{Cookie:cookie}});
     assert.equal(downloaded.status,200);
     const bytes=await downloaded.bytes();
     t.diagnostic(createHash('sha256').update(bytes).digest('hex'));
@@ -119,6 +123,49 @@ test('HTTP to MCP confirmation and export downloads two readable corrected PDFs'
     assert.ok(text.includes(form==='application'?'Volunteer application':'Availability and equipment request'),
       'PDF text contains its expected form title');
     assert.ok(text.includes('Applicant-confirmed'),'PDF text records applicant confirmation');
+  }
+
+  const correctedAgain=await requestApp(base,`${base}/api/cases/${created.id}/correct`,{method:'POST',headers,
+    body:{expectedRevision:confirmedPacket.revision,idempotencyKey:'http-journey-correct-002',field:'availability',value:'Fridays'}});
+  assert.equal(correctedAgain.status,200,await responseError(correctedAgain));
+  const updatedPacket=(await correctedAgain.json() as {packet:{revision:number;confirmedRevision:number|null;facts:Record<string,{value:unknown}>}}).packet;
+  assert.equal(updatedPacket.revision,confirmedPacket.revision+1,'post-export correction advances the revision');
+  assert.equal(updatedPacket.facts.availability?.value,'Fridays');
+  assert.equal(updatedPacket.confirmedRevision,null,'post-export correction invalidates confirmation');
+  for(const {url} of originalDownloads){
+    const staleDownload=await requestApp(base,url,{headers:{Cookie:cookie}});
+    assert.equal(staleDownload.status,409,'previously working download is rejected after correction');
+    assert.deepEqual(await staleDownload.json(),{error:'STALE_EXPORT'});
+  }
+
+  const reconfirmed=await requestApp(base,`${base}/api/cases/${created.id}/confirm`,{method:'POST',headers,
+    body:{expectedRevision:updatedPacket.revision,idempotencyKey:'http-journey-confirm-002',iConfirm:true}});
+  assert.equal(reconfirmed.status,200,await responseError(reconfirmed));
+  const reconfirmedPacket=(await reconfirmed.json() as {packet:{revision:number;confirmedRevision:number}}).packet;
+  assert.equal(reconfirmedPacket.confirmedRevision,reconfirmedPacket.revision);
+  const exportedAgain=await requestApp(base,`${base}/api/cases/${created.id}/export`,{method:'POST',headers,
+    body:{expectedRevision:reconfirmedPacket.revision,idempotencyKey:'http-journey-export-002'}});
+  assert.equal(exportedAgain.status,200,await responseError(exportedAgain));
+  const freshManifest=(await exportedAgain.json() as {export:{id:string;revision:number;status:string;artifacts:{name:string;sha256:string}[]}}).export;
+  exportIds.push(freshManifest.id);
+  assert.notEqual(freshManifest.id,manifest.id,'reconfirmed revision gets a fresh export');
+  assert.equal(freshManifest.revision,reconfirmedPacket.revision);
+  assert.equal(freshManifest.status,'Applicant-confirmed');
+  assert.deepEqual(freshManifest.artifacts.map(item=>item.name).sort(),[...formNames].sort());
+  for(const form of formNames){
+    const downloaded=await requestApp(base,`${base}/api/cases/${created.id}/exports/${freshManifest.id}/${form}`,{headers:{Cookie:cookie}});
+    assert.equal(downloaded.status,200);
+    const bytes=await downloaded.bytes();
+    t.diagnostic(createHash('sha256').update(bytes).digest('hex'));
+    assert.ok(bytes.subarray(0,8).toString('latin1').startsWith('%PDF-1.'),'fresh download has a valid PDF header');
+    assert.ok(bytes.includes(Buffer.from('%%EOF')),'fresh PDF has an EOF marker');
+    const text=extractPdfText(bytes);
+    assert.ok(text.includes('Nora Grey'),'fresh PDF retains the synthetic applicant');
+    assert.ok(text.includes('Fridays'),'fresh PDF contains the post-export correction');
+    assert.ok(!text.includes('Wednesdays'),'fresh PDF does not contain superseded availability');
+    assert.ok(text.includes(form==='application'?'Volunteer application':'Availability and equipment request'),
+      'fresh PDF text contains its expected form title');
+    assert.ok(text.includes('Applicant-confirmed'),'fresh PDF records renewed confirmation');
   }
 });
 
