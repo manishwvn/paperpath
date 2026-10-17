@@ -4,9 +4,25 @@ PaperPath is a practice simulator that helps a fictional community volunteer app
 
 The application is in active development. Public-origin configuration is covered by PR #11 and its CI check, but public HTTPS operation, eligible hosting, and judge access have not been proven. Local Chrome and PDF checks used synthetic facts with the provider disabled. Original code and demonstration templates are MIT licensed.
 
+## Check out the review candidate
+
+The default `main` branch is currently an older backend-only revision; it does not contain the frontend walkthrough below. The [PR #14 candidate](https://github.com/manishwvn/paperpath/pull/14), on `codex/a11y-correction-status`, is under review. Use the pinned tested code commit `229824f69b69689fae0fb621458fb435a630fe38`, not the moving branch head, for this local evaluation. This candidate is not a release or submission-readiness claim; browser keyboard and screen-reader verification for its accessibility changes remains open.
+
+From a directory where `paperpath-review` does not already exist:
+
+```sh
+git clone --no-checkout https://github.com/manishwvn/paperpath.git paperpath-review
+cd paperpath-review
+git fetch origin refs/pull/14/head
+git checkout --detach 229824f69b69689fae0fb621458fb435a630fe38
+git rev-parse HEAD
+```
+
+The last command must print `229824f69b69689fae0fb621458fb435a630fe38`. Fetching the PR makes its history available; the detached checkout selects the exact tested code even if the PR head advances.
+
 ## Run locally
 
-Use Node 24.6.0. From this directory, install the locked dependencies, build the frontend, and start the server:
+After the pinned checkout above, use Node 24.6.0. From the `paperpath-review` directory, install the locked dependencies, build the frontend, and start the server:
 
 ```sh
 npm ci
