@@ -40,7 +40,7 @@ test('message requests preserve owner-scoped replay and pending behavior over HT
   assert.equal(result.schema, 'paperpath-message-single-flight-test-v1');
   assert.equal(result.result, 'PASS');
   assert.equal(result.providerEndpointGuarded, true);
-  assert.equal(result.providerCalls, 6);
+  assert.equal(result.providerCalls, 9);
   assert.equal(result.firstWaveCalls, 2);
   assert.equal(result.ownerIsolation, true);
   assert.equal(result.identicalDedup, true);
@@ -48,6 +48,8 @@ test('message requests preserve owner-scoped replay and pending behavior over HT
   assert.equal(result.committedReplayNoProviderCall, true);
   assert.equal(result.unknownFailureRemainsPendingWithoutRetry, true);
   assert.equal(result.completionMcpFailureLeavesReservationPendingWithoutRetry, true);
+  assert.equal(result.unsupportedCompletionReturnsClarificationWithoutMutationOrRetry, true);
+  assert.equal(result.conflictingCompletionRemainsPendingWithoutMutationOrRetry, true);
   assert.equal(result.lostCompletionResponseReplayDiscoversCommitWithoutRetry, true);
   assert.equal(result.midflightProcessCrashRemainsPendingWithoutRetry, true);
   const adapterResult = result.mcpAdapterCompletion as Record<string, unknown>;

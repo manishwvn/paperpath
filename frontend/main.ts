@@ -281,6 +281,8 @@ function friendly(e: unknown): string {
     if (e.code === 'network_error') return 'Network issue. Your text was kept. Please retry.';
     if (e.code === 'STALE_REVISION') return 'This case changed. Refreshed to the current revision. Please review before retrying.';
     if (e.code === 'MESSAGE_PENDING') return 'This message is still pending and may have completed. Your text is still here, and the case is saved. Select “Resume case” to check the latest state; do not resubmit this message.';
+    if (e.code === 'UNSUPPORTED_FACT') return 'That fact was not clearly supported by your message. Please restate the detail you want included.';
+    if (e.code === 'UNSUPPORTED_EVIDENCE') return 'The supporting words could not be matched to your message. Please restate the detail exactly.';
     if (e.code === 'invalid_response') return 'Response could not be read. Your text was kept. Please retry.';
     const low = e.code.toLowerCase();
     if (low.includes('provider') || low.includes('model') || low.includes('groq') || low.includes('upstream')) return 'Helper service is unavailable. Your text was kept. You can still correct facts manually.';
