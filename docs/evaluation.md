@@ -4,19 +4,19 @@ PaperPath is a practice simulator, not Amazon Alexa+, and it does not submit an 
 
 ## Check out the review candidate
 
-The default `main` branch is currently an older backend-only revision and does not contain this frontend journey. The [PR #14 candidate](https://github.com/manishwvn/paperpath/pull/14), on `codex/a11y-correction-status`, is under review. These steps pin tested code commit `229824f69b69689fae0fb621458fb435a630fe38`; a moving branch head may contain different code. This is a local review candidate, not a submission-ready release.
+The default `main` branch is currently an older backend-only revision and does not contain this frontend journey. The [PR #15 candidate](https://github.com/manishwvn/paperpath/pull/15), on `codex/core03-clarification`, is under review. These steps pin tested application source commit `5b2205cf6e6ecd6693f453bfc101b24d800e2e63`; a later documentation-only branch commit may move the PR head without changing this tested application source. This is a local review candidate, not a submission-ready release.
 
 From a directory where `paperpath-review` does not already exist:
 
 ```sh
 git clone --no-checkout https://github.com/manishwvn/paperpath.git paperpath-review
 cd paperpath-review
-git fetch origin refs/pull/14/head
-git checkout --detach 229824f69b69689fae0fb621458fb435a630fe38
+git fetch origin refs/pull/15/head
+git checkout --detach 5b2205cf6e6ecd6693f453bfc101b24d800e2e63
 git rev-parse HEAD
 ```
 
-The last command must print `229824f69b69689fae0fb621458fb435a630fe38`. Fetching the PR makes its history available; the detached checkout selects the pinned code even if the PR head advances.
+The last command must print `5b2205cf6e6ecd6693f453bfc101b24d800e2e63`. Fetching the PR makes its history available; the detached checkout selects the pinned application source even if the PR head advances.
 
 ## Start the app without inference
 
