@@ -30,6 +30,9 @@ let preloadPath;
 let base;
 let mockBase;
 const completionDispatchFailureKey = `msg_${randomUUID()}`;
+const unsupportedCompletionKey = `msg_${randomUUID()}`;
+const unsupportedEvidenceCompletionKey = `msg_${randomUUID()}`;
+const conflictingCompletionKey = `msg_${randomUUID()}`;
 const lostCompletionResponseKey = `msg_${randomUUID()}`;
 let adapterCleanupAction;
 let cleanupTask;
@@ -622,6 +625,9 @@ try {
 const provider='https://api.groq.com/openai/v1/chat/completions';
 const mockBase=${JSON.stringify(mockBase)};
 const dispatchFailureKey=${JSON.stringify(completionDispatchFailureKey)};
+const unsupportedKey=${JSON.stringify(unsupportedCompletionKey)};
+const unsupportedEvidenceKey=${JSON.stringify(unsupportedEvidenceCompletionKey)};
+const conflictingKey=${JSON.stringify(conflictingCompletionKey)};
 const lostResponseKey=${JSON.stringify(lostCompletionResponseKey)};
 const dispatchFailureMarker=${JSON.stringify(dispatchFailureMarker)};
 const responseLossMarker=${JSON.stringify(responseLossMarker)};
@@ -646,6 +652,12 @@ globalThis.fetch=async(input,init={})=>{
   else if(u.origin===appBase && u.hostname==='127.0.0.1') target=input;
   else throw new Error('network-guard-rejected');
   const key=u.pathname==='/mcp'?completionKey(input,init):undefined;
+  if(key===unsupportedKey||key===unsupportedEvidenceKey||key===conflictingKey){
+    const request=JSON.parse(typeof init.body==='string'?init.body:new TextDecoder().decode(init.body));
+    const code=key===unsupportedKey?'UNSUPPORTED_FACT':key===unsupportedEvidenceKey?'UNSUPPORTED_EVIDENCE':'IDEMPOTENCY_CONFLICT';
+    return new Response(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{isError:true,content:[{type:'text',text:code}]}}),
+      {status:200,headers:{'content-type':'application/json'}});
+  }
   if(key===dispatchFailureKey&&!dispatchFailureInjected){
     dispatchFailureInjected=true;
     const fs=await import('node:fs/promises');
@@ -771,6 +783,65 @@ globalThis.fetch=async(input,init={})=>{
     reservation: mainDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerAId, key),
     packet: mainDb.prepare('SELECT revision,body FROM cases WHERE id=?').get(caseA.id)
   });
+  const unsupportedBody = {
+    expectedRevision: proofA.packet.revision,
+    idempotencyKey: unsupportedCompletionKey,
+    text: 'Morgan Bell asked us to confirm the north gate schedule.'
+  };
+  const beforeUnsupported = providerCalls;
+  const unsupported = await api('POST', messagePathA, ownerA, unsupportedBody);
+  assert.equal(unsupported.status, 400);
+  assert.equal(unsupported.json.error, 'UNSUPPORTED_FACT');
+  assert.match(unsupported.json.message, /not clearly supported/);
+  assert.equal(providerCalls, beforeUnsupported + 1, 'unsupported completion follows exactly one extraction');
+  const unsupportedSnapshot = mainMessageSnapshot(unsupportedCompletionKey);
+  assert.equal(unsupportedSnapshot.operation.length, 0, 'unsupported completion writes no operation');
+  assert.equal(unsupportedSnapshot.reservation.length, 1, 'unsupported completion keeps reservation pending');
+  assert.equal(unsupportedSnapshot.packet.revision, proofA.packet.revision, 'unsupported completion leaves case unchanged');
+  const unsupportedReplay = await api('POST', messagePathA, ownerA, unsupportedBody);
+  assert.equal(unsupportedReplay.status, 409);
+  assert.equal(unsupportedReplay.json.error, 'MESSAGE_PENDING');
+  assert.equal(providerCalls, beforeUnsupported + 1, 'unsupported completion replay does not reinfer');
+
+  const unsupportedEvidenceBody = {
+    expectedRevision: proofA.packet.revision,
+    idempotencyKey: unsupportedEvidenceCompletionKey,
+    text: 'Morgan Bell asked us to confirm the north gate schedule.'
+  };
+  const beforeUnsupportedEvidence = providerCalls;
+  const unsupportedEvidence = await api('POST', messagePathA, ownerA, unsupportedEvidenceBody);
+  assert.equal(unsupportedEvidence.status, 400);
+  assert.equal(unsupportedEvidence.json.error, 'UNSUPPORTED_EVIDENCE');
+  assert.match(unsupportedEvidence.json.message, /could not be matched/);
+  assert.equal(providerCalls, beforeUnsupportedEvidence + 1, 'unsupported evidence follows exactly one extraction');
+  const unsupportedEvidenceSnapshot = mainMessageSnapshot(unsupportedEvidenceCompletionKey);
+  assert.equal(unsupportedEvidenceSnapshot.operation.length, 0, 'unsupported evidence writes no operation');
+  assert.equal(unsupportedEvidenceSnapshot.reservation.length, 1, 'unsupported evidence keeps reservation pending');
+  assert.equal(unsupportedEvidenceSnapshot.packet.revision, proofA.packet.revision, 'unsupported evidence leaves case unchanged');
+  const unsupportedEvidenceReplay = await api('POST', messagePathA, ownerA, unsupportedEvidenceBody);
+  assert.equal(unsupportedEvidenceReplay.status, 409);
+  assert.equal(unsupportedEvidenceReplay.json.error, 'MESSAGE_PENDING');
+  assert.equal(providerCalls, beforeUnsupportedEvidence + 1, 'unsupported evidence replay does not reinfer');
+
+  const conflictingBody = {
+    expectedRevision: proofA.packet.revision,
+    idempotencyKey: conflictingCompletionKey,
+    text: 'Morgan Bell asked us to confirm the north gate schedule.'
+  };
+  const beforeConflicting = providerCalls;
+  const conflicting = await api('POST', messagePathA, ownerA, conflictingBody);
+  assert.equal(conflicting.status, 409);
+  assert.equal(conflicting.json.error, 'MESSAGE_PENDING', 'completion conflict remains generic pending');
+  assert.equal(providerCalls, beforeConflicting + 1, 'conflicting completion follows exactly one extraction');
+  const conflictingSnapshot = mainMessageSnapshot(conflictingCompletionKey);
+  assert.equal(conflictingSnapshot.operation.length, 0, 'conflicting completion writes no operation');
+  assert.equal(conflictingSnapshot.reservation.length, 1, 'conflicting completion keeps reservation pending');
+  assert.equal(conflictingSnapshot.packet.revision, proofA.packet.revision, 'conflicting completion leaves case unchanged');
+  const conflictingReplay = await api('POST', messagePathA, ownerA, conflictingBody);
+  assert.equal(conflictingReplay.status, 409);
+  assert.equal(conflictingReplay.json.error, 'MESSAGE_PENDING');
+  assert.equal(providerCalls, beforeConflicting + 1, 'conflicting completion replay does not reinfer');
+
   let dispatchFailureSnapshot;
   try {
     dispatchFailureSnapshot = mainMessageSnapshot(completionDispatchFailureKey);
@@ -779,10 +850,11 @@ globalThis.fetch=async(input,init={})=>{
     assert.match(dispatchFailureSnapshot.reservation[0].attempt_token, /^[a-f0-9]{32}$/);
     assert.equal(dispatchFailureSnapshot.packet.revision, proofA.packet.revision);
 
+    const beforeCompletionFailureReplay = providerCalls;
     const completionFailureReplay = await api('POST', messagePathA, ownerA, completionFailureBody);
     assert.equal(completionFailureReplay.status, 409);
     assert.equal(completionFailureReplay.json.error, 'MESSAGE_PENDING');
-    assert.equal(providerCalls, beforeCompletionFailure + 1,
+    assert.equal(providerCalls, beforeCompletionFailureReplay,
       'same-key replay of unknown MCP outcome does not extract again');
     assert.deepEqual(mainMessageSnapshot(completionDispatchFailureKey), dispatchFailureSnapshot,
       'same-key replay leaves pending reservation and case unchanged');
@@ -893,10 +965,12 @@ globalThis.fetch=async(input,init={})=>{
   const adapterResult = await verifyAdapterCompletion();
   const result = {
     schema: 'paperpath-message-single-flight-test-v1', result: 'PASS',
-    providerEndpointGuarded: true, providerCalls: 6,
+    providerEndpointGuarded: true, providerCalls: 9,
     firstWaveCalls: 2, ownerIsolation: true, identicalDedup: true, changedPayload409: true,
     committedReplayNoProviderCall: true, unknownFailureRemainsPendingWithoutRetry: true,
     completionMcpFailureLeavesReservationPendingWithoutRetry: true,
+    unsupportedCompletionReturnsClarificationWithoutMutationOrRetry: true,
+    conflictingCompletionRemainsPendingWithoutMutationOrRetry: true,
     lostCompletionResponseReplayDiscoversCommitWithoutRetry: true,
     midflightProcessCrashRemainsPendingWithoutRetry: true,
     sourceEvidenceVerifiedForBothOwners: true,

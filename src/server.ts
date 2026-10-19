@@ -197,6 +197,7 @@ app.post('/api/cases/:caseId/message',async(req,res)=>{
     if (!reservation.acquired) throw new DomainError('MESSAGE_PENDING');
 
     let extractionAttempted = false;
+    let completingMessage = false;
     try {
       return await withMcp(res.locals.owner,async client=>{
         const listed = await client.listTools();
@@ -205,14 +206,20 @@ app.post('/api/cases/:caseId/message',async(req,res)=>{
         if (!candidatesSchema) throw new DomainError('MCP_SCHEMA_UNAVAILABLE');
         extractionAttempted = true;
         const candidates = await extractCandidates(args.text,candidatesSchema,{key:process.env.GROQ_API_KEY,model});
+        completingMessage = true;
         await call<Case>(client,'complete_message',{caseId,expectedRevision:args.expectedRevision,
           idempotencyKey:args.idempotencyKey,sourceText:args.text,attemptToken:reservation.attemptToken,candidates});
+        completingMessage = false;
         return call<Case>(client,'get_case',{caseId});
       });
     } catch (error) {
       if (!extractionAttempted || getExtractionOutcome(error)==='not-started') {
         store.releaseMessage(res.locals.owner,caseId,args.expectedRevision,args.idempotencyKey,args.text,
           reservation.attemptToken,'not-started');
+        throw error;
+      }
+      if (completingMessage && error instanceof DomainError &&
+          (error.code==='UNSUPPORTED_FACT' || error.code==='UNSUPPORTED_EVIDENCE')) {
         throw error;
       }
       throw new DomainError('MESSAGE_PENDING');
@@ -271,7 +278,12 @@ app.use((error:unknown,_req:Request,res:Response,_next:NextFunction)=>{
   void _next;
   const code = error instanceof DomainError?error.code:error instanceof z.ZodError?'INVALID_INPUT':'INTERNAL_ERROR';
   const status = /STALE|CONFLICT|PENDING/.test(code)?409:/NOT_FOUND/.test(code)?404:/PROVIDER|GROQ/.test(code)?503:code==='INTERNAL_ERROR'?500:400;
-  res.status(status).json({error:code});
+  const message = code==='UNSUPPORTED_FACT'
+    ? 'That fact was not clearly supported by your message. Please restate the detail you want included.'
+    : code==='UNSUPPORTED_EVIDENCE'
+      ? 'The supporting words could not be matched to your message. Please restate the detail exactly.'
+      : undefined;
+  res.status(status).json(message ? {error:code,message} : {error:code});
 });
 const http = app.listen(port,'127.0.0.1',()=>console.log(`PaperPath listening at ${base}`));
 process.on('SIGTERM',()=>http.close(()=>{store.close();process.exit(0);}));
