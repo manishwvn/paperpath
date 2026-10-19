@@ -1,29 +1,29 @@
 # Submission draft — not recorded or submitted
 
-Draft based on the local Chrome/PDF journey at source `47e59cb1f63e54a0bbaa0c42f502bb3b7494c3b2`, PR #11, and the current public README. The detailed local receipt and synthetic runtime artifacts are not public deliverables. Treat every field marked **Not verified** as unfinished. This draft is not a claim that the entry is eligible, hosted, or available to judges.
+Draft based on the PR #15 review candidate and current public README. Runtime evidence is separately scoped: a providerless manual UI journey and one live HTTP/extraction/MCP/PDF run were completed on PR #14 app source `229824f69b69689fae0fb621458fb435a630fe38`. Neither is a PR #15 runtime execution. A private review video assembles those distinct runs; it is not a continuous live inference recording or a public demo link. Treat every field marked **Not verified** as unfinished. This draft is not a claim that the entry is eligible, hosted, or available to judges.
 
 ## Review candidate source and checkout
 
-The default `main` branch is currently an older backend-only revision and does not contain the frontend evaluator journey. The [PR #14 candidate](https://github.com/manishwvn/paperpath/pull/14), on `codex/a11y-correction-status`, is under review. The tested code commit for the current local setup instructions is `229824f69b69689fae0fb621458fb435a630fe38`. The older Chrome/PDF receipt above does not verify this candidate's accessibility changes; browser keyboard and screen-reader runtime verification remains open. This candidate is not submission-ready.
+The default `main` branch is currently an older backend-only revision and does not contain the frontend evaluator journey. The [PR #15 candidate](https://github.com/manishwvn/paperpath/pull/15), on `codex/core03-clarification`, is under review. The tested application source for these evaluator instructions is `5b2205cf6e6ecd6693f453bfc101b24d800e2e63`. A separate live integration run was performed earlier on PR #14 app source `229824f69b69689fae0fb621458fb435a630fe38`; it does not verify PR #15 at runtime. Browser keyboard and screen-reader runtime verification of the PR #15 candidate remains open. This candidate is not submission-ready.
 
 From a directory where `paperpath-review` does not already exist:
 
 ```sh
 git clone --no-checkout https://github.com/manishwvn/paperpath.git paperpath-review
 cd paperpath-review
-git fetch origin refs/pull/14/head
-git checkout --detach 229824f69b69689fae0fb621458fb435a630fe38
+git fetch origin refs/pull/15/head
+git checkout --detach 5b2205cf6e6ecd6693f453bfc101b24d800e2e63
 git rev-parse HEAD
 ```
 
-The last command must print `229824f69b69689fae0fb621458fb435a630fe38`. Fetching the PR makes its history available; the detached checkout selects that code even if the PR head advances. Follow the [local evaluator guide](evaluation.md) from that checkout.
+The last command must print `5b2205cf6e6ecd6693f453bfc101b24d800e2e63`. Fetching the PR makes its history available; the detached checkout selects that code even if the PR head advances. Follow the [local evaluator guide](evaluation.md) from that checkout.
 
 ## Proposed Devpost fields
 
 - **Title:** PaperPath — Keep a volunteer application and request in sync
 - **Track:** Alexa+ is a candidate track only. **Eligibility and track fit are not verified.**
-- **Source candidate:** [PR #14](https://github.com/manishwvn/paperpath/pull/14), branch `codex/a11y-correction-status`, pinned code commit `229824f69b69689fae0fb621458fb435a630fe38`. The default repository `main` is an older backend-only revision; this candidate remains under review.
-- **Description:** PaperPath is a locally run practice simulator for a fictional community volunteer program. It helps a volunteer applicant keep a volunteer application and an availability and equipment request consistent. Users can review and correct facts, see evidence and unknown values, confirm a practice draft, and export two matching PDFs. The project uses a TypeScript/Express application with SQLite and an MCP client/server over Streamable HTTP. Local automated tests exercise MCP behavior with synthetic fixtures. In the verified browser journey, the inference provider was unavailable, so facts were entered through the manual correction controls. PaperPath is not connected to Amazon's gated Alexa+ service, does not accept arbitrary PDFs, and does not submit an application to an organization. Public hosting and external HTTPS access have not been proven; the Alexa+ event FAQ says an always-on host is optional when the public repository runs locally and a demo video is provided. PaperPath's complete evaluator path and judge-access checks remain unfinished.
+- **Source candidate:** [PR #15](https://github.com/manishwvn/paperpath/pull/15), branch `codex/core03-clarification`, pinned tested app commit `5b2205cf6e6ecd6693f453bfc101b24d800e2e63`. The default repository `main` is an older backend-only revision; this candidate remains under review. The live integration evidence below predates it and is not a PR #15 runtime test.
+- **Description:** PaperPath is a locally run practice simulator for a fictional community volunteer program. It helps an applicant keep a volunteer application and an availability/equipment request consistent. Users can review and correct facts, see evidence and unknown values, confirm a practice draft, and export two matching PDFs. The project uses TypeScript/Express, SQLite, and an MCP client/server over Streamable HTTP. Local automated tests also exercise MCP behavior with synthetic fixtures. On 2026-10-18, one separate live integration run on PR #14 app source `229824f69b69689fae0fb621458fb435a630fe38` used one Groq request for a synthetic message, returned five candidate facts with exact source quotes, completed the real local MCP route, recorded an explicit availability correction to Wednesdays, confirmed revision 4, and exported two manifest-matched PDFs. A separate provider-disabled browser recording shows a manual synthetic workflow; it does not show live extraction. The private review video keeps these runs separate and is not a continuous live UI-to-provider recording. PaperPath is not connected to Amazon's gated Alexa+ service, does not accept arbitrary PDFs, and does not submit an application to an organization. Public hosting and external HTTPS access have not been proven; the Alexa+ event FAQ says an always-on host is optional when the public repository runs locally and a demo video is provided. PaperPath's complete evaluator path and judge-access checks remain unfinished.
 - **Setup:** First use the pinned candidate checkout commands above; do not use the older default `main`. Use Node 24.6.0. Run `npm ci`, `npm run build`, then `env -u GROQ_API_KEY npm run dev` for the key-free evaluator path. The default app is loopback-only at `http://127.0.0.1:4317`. See the README for the optional exact HTTPS-origin allowlist; that setting requires a separately configured TLS reverse proxy and does not deploy the app.
 - **Product feedback — entrant draft, not submitted:** The event asks the entrant for feedback on developer tools/APIs/SDKs used; it does not require an external reviewer. This draft reflects my own setup, integration, and documentation work. I did not use the Alexa+ Category SDK, CLI, or Web Simulator: the FAQ says preview access is limited to select partners and provides no hackathon application path. I have no runtime feedback on those gated tools. My documentation feedback is to put that access restriction at the top of affected guides and link a minimal public MCP-server-plus-simulator recipe; the discovery steps and workaround are in the friction log below.
 
@@ -38,14 +38,14 @@ The last command must print `229824f69b69689fae0fb621458fb435a630fe38`. Fetching
   - **Severity:** Moderate onboarding friction for the gated preview path; it does not block the documented self-hosted MCP/simulator path.
   - **Workaround:** Use PaperPath's own web simulator with its self-hosted MCP server over Streamable HTTP; provide clear local setup and evaluation steps.
   - **Actionable suggestion:** Put the select-partner access restriction at the top of each affected setup guide and provide a minimal public MCP-server-plus-simulator recipe for hackathon participants.
-- **Video URL:** **Not recorded or published.**
+- **Video URL:** **Not published.** A private 97.83-second review preview exists; it combines the separate PR #14 providerless UI clip and live integration/PDF evidence. It is not a continuous recording, has no public URL, and does not verify PR #15 runtime behavior.
 - **Mini-challenges / additional tracks:** **Not selected or verified.**
 - **Public demo and judge access:** **Not ready yet.** The official Alexa+ FAQ says hosting is not required when a public repository runs locally and a demo video is provided. PaperPath's public video, reproducible local evaluator path, and signed-out access checks remain unfinished; no host or public deployment is claimed.
 - **Submission status:** **Not submitted.** Rules eligibility, signed-out access, required declarations, and final Devpost preflight remain open.
 
 ## Proposed 2:40 demo script
 
-The script is a recording outline, not a recorded video. Use only fictional names, `.example.test` email addresses, and other synthetic facts. Keep the practice-only label visible.
+This 2:40 script remains a proposed continuous recording outline. A separate private preview exists, but it assembles two older PR #14 evidence runs rather than showing one continuous journey. Use only fictional names, `.example.test` email addresses, and other synthetic facts. Keep the practice-only label visible.
 
 | Time | Show and say |
 |---|---|
@@ -55,6 +55,6 @@ The script is a recording outline, not a recorded video. Use only fictional name
 | 1:10–1:35 | Compare the volunteer application and availability/equipment preview. Change availability once and show that the shared value appears in both forms. Leave any unavailable or conflicting value visibly unknown. |
 | 1:35–1:55 | Read the practice confirmation notice, mark the facts reviewed, and confirm for practice. Show the draft status changing to “Confirmed for practice.” |
 | 1:55–2:20 | Export the packet, open both PDFs, and point to the matching applicant, availability, and equipment answers. The current local receipt verifies one-page A4 PDFs with matching text and readable rendering. |
-| 2:20–2:40 | Close with the actual verification boundary: “Tests cover the local MCP path with synthetic mocks. This run had no provider configured. Hosting is optional for this Alexa+ event; the public video and judge-ready local instructions still need to be completed. This does not submit a real application.” |
+| 2:20–2:40 | Close with the actual verification boundary: “The UI clip used a provider-disabled manual flow. A separate October 18 run used one provider request and completed the real MCP route and two PDF exports on PR #14 source; that was not recorded as a continuous browser journey. PR #15 has not had a runtime replay. Hosting is optional for this event when the repository runs locally and a demo video is provided. This does not submit a real application.” |
 
-Before using this script for submission, record the actual running app, inspect the finished video and duration, add verified public links, obtain genuine product feedback, check event rules and eligibility, and verify judge access from a signed-out browser. None of those steps is complete here.
+Before using this script for submission, record and inspect a current-candidate demo, publish an authorized public video, add verified public links, obtain genuine product feedback, check event rules and eligibility, and verify judge access from a signed-out browser. Those release steps remain open.
