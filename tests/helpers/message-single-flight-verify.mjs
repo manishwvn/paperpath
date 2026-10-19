@@ -19,6 +19,7 @@ const held = [];
 let providerCalls = 0;
 let failNext = false;
 let holdNextProviderResponse = false;
+let unsupportedFactNext = false;
 let child;
 let childExit;
 let mock;
@@ -32,6 +33,7 @@ let mockBase;
 const completionDispatchFailureKey = `msg_${randomUUID()}`;
 const unsupportedCompletionKey = `msg_${randomUUID()}`;
 const unsupportedEvidenceCompletionKey = `msg_${randomUUID()}`;
+const domainUnsupportedCompletionKey = `msg_${randomUUID()}`;
 const conflictingCompletionKey = `msg_${randomUUID()}`;
 const lostCompletionResponseKey = `msg_${randomUUID()}`;
 let adapterCleanupAction;
@@ -59,15 +61,17 @@ function waitUntil(predicate, label, ms = timeoutMs) {
     poll();
   });
 }
-function toolResponse() {
+function toolResponse(unsupportedFact = false) {
   return JSON.stringify({ choices: [{ message: { role: 'assistant', tool_calls: [{ type: 'function', function: {
-    name: 'propose_facts', arguments: JSON.stringify({ candidates: [{ field: 'name', value: 'Morgan Bell', quote: 'Morgan Bell' }] })
+    name: 'propose_facts', arguments: JSON.stringify({ candidates: [{
+      field: 'name', value: unsupportedFact ? 'Jordan Lee' : 'Morgan Bell', quote: 'Morgan Bell'
+    }] })
   } }] }, finish_reason: 'tool_calls' }] });
 }
-function finishProvider(res, status = 200) {
+function finishProvider(res, status = 200, unsupportedFact = false) {
   if (!res.destroyed && !res.writableEnded) {
     res.writeHead(status, { 'content-type': 'application/json' });
-    res.end(status === 200 ? toolResponse() : JSON.stringify({ error: 'synthetic-failure' }));
+    res.end(status === 200 ? toolResponse(unsupportedFact) : JSON.stringify({ error: 'synthetic-failure' }));
   }
 }
 function releaseHeld() {
@@ -609,6 +613,7 @@ try {
       if (failNext) { failNext = false; finishProvider(res, 400); return; }
       if (holdNextProviderResponse) { holdNextProviderResponse = false; held.push(res); return; }
       if (providerCalls <= 2) { held.push(res); return; }
+      if (unsupportedFactNext) { unsupportedFactNext = false; finishProvider(res, 200, true); return; }
       finishProvider(res);
     });
   });
@@ -823,6 +828,33 @@ globalThis.fetch=async(input,init={})=>{
   assert.equal(unsupportedEvidenceReplay.json.error, 'MESSAGE_PENDING');
   assert.equal(providerCalls, beforeUnsupportedEvidence + 1, 'unsupported evidence replay does not reinfer');
 
+  const domainUnsupportedBody = {
+    expectedRevision: proofA.packet.revision,
+    idempotencyKey: domainUnsupportedCompletionKey,
+    text: 'Morgan Bell asked us to confirm the north gate schedule.'
+  };
+  const beforeDomainUnsupported = providerCalls;
+  const domainUnsupportedPacketBefore = mainDb.prepare('SELECT revision,body FROM cases WHERE id=?').get(caseA.id);
+  unsupportedFactNext = true;
+  const domainUnsupported = await api('POST', messagePathA, ownerA, domainUnsupportedBody);
+  assert.equal(domainUnsupported.status, 400);
+  assert.equal(domainUnsupported.json.error, 'UNSUPPORTED_FACT');
+  assert.match(domainUnsupported.json.message, /not clearly supported/);
+  assert.equal(JSON.stringify(domainUnsupported.json).includes('Jordan Lee'), false,
+    'the HTTP error exposes sanitized guidance, not the rejected provider candidate');
+  assert.equal(providerCalls, beforeDomainUnsupported + 1,
+    'the production domain rejection follows exactly one schema-valid provider response');
+  const domainUnsupportedSnapshot = mainMessageSnapshot(domainUnsupportedCompletionKey);
+  assert.equal(domainUnsupportedSnapshot.operation.length, 0, 'domain-rejected completion writes no operation');
+  assert.equal(domainUnsupportedSnapshot.reservation.length, 1, 'domain-rejected completion keeps reservation pending');
+  assert.deepEqual(domainUnsupportedSnapshot.packet, domainUnsupportedPacketBefore,
+    'domain-rejected completion leaves case revision and facts unchanged');
+  const domainUnsupportedReplay = await api('POST', messagePathA, ownerA, domainUnsupportedBody);
+  assert.equal(domainUnsupportedReplay.status, 409);
+  assert.equal(domainUnsupportedReplay.json.error, 'MESSAGE_PENDING');
+  assert.equal(providerCalls, beforeDomainUnsupported + 1,
+    'same-key replay after the production domain rejection does not reinfer');
+
   const conflictingBody = {
     expectedRevision: proofA.packet.revision,
     idempotencyKey: conflictingCompletionKey,
@@ -965,15 +997,17 @@ globalThis.fetch=async(input,init={})=>{
   const adapterResult = await verifyAdapterCompletion();
   const result = {
     schema: 'paperpath-message-single-flight-test-v1', result: 'PASS',
-    providerEndpointGuarded: true, providerCalls: 9,
+    providerEndpointGuarded: true, providerCalls: 10,
     firstWaveCalls: 2, ownerIsolation: true, identicalDedup: true, changedPayload409: true,
     committedReplayNoProviderCall: true, unknownFailureRemainsPendingWithoutRetry: true,
     completionMcpFailureLeavesReservationPendingWithoutRetry: true,
     unsupportedCompletionReturnsClarificationWithoutMutationOrRetry: true,
+    productionDomainUnsupportedFactReturnsSanitizedClarificationWithoutMutationOrRetry: true,
     conflictingCompletionRemainsPendingWithoutMutationOrRetry: true,
     lostCompletionResponseReplayDiscoversCommitWithoutRetry: true,
     midflightProcessCrashRemainsPendingWithoutRetry: true,
     sourceEvidenceVerifiedForBothOwners: true,
+    runtimeEvidenceScope: 'Production HTTP route, MCP transport, and domain validator; no browser UI and not a complete missing/conflict/unsupported journey.',
     mcpAdapterCompletion: adapterResult
   };
   console.log(JSON.stringify(result));
