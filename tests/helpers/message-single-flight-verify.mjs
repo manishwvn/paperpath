@@ -18,8 +18,10 @@ const timeoutMs = 8000;
 const held = [];
 let providerCalls = 0;
 let failNext = false;
+let nextProviderMode;
 let holdNextProviderResponse = false;
 let unsupportedFactNext = false;
+let conflictingFactNext = false;
 let child;
 let childExit;
 let mock;
@@ -61,10 +63,12 @@ function waitUntil(predicate, label, ms = timeoutMs) {
     poll();
   });
 }
-function toolResponse(unsupportedFact = false) {
+function toolResponse(unsupportedFact = false, conflictingFact = false) {
+  const value = unsupportedFact ? 'Jordan Lee' : conflictingFact ? 'Nora Grey' : 'Morgan Bell';
+  const quote = conflictingFact ? 'Nora Grey' : 'Morgan Bell';
   return JSON.stringify({ choices: [{ message: { role: 'assistant', tool_calls: [{ type: 'function', function: {
     name: 'propose_facts', arguments: JSON.stringify({ candidates: [{
-      field: 'name', value: unsupportedFact ? 'Jordan Lee' : 'Morgan Bell', quote: 'Morgan Bell'
+      field: 'name', value, quote
     }] })
   } }] }, finish_reason: 'tool_calls' }] });
 }
@@ -158,16 +162,18 @@ function cleanup() {
   }
   return cleanupTask;
 }
-async function api(method, route, session, payload) {
+async function api(method, route, session, payload, requestTimeoutMs = timeoutMs) {
+  const url = new URL(route, base);
+  if (url.origin !== base || url.hostname !== '127.0.0.1') throw new Error('api-origin-rejected');
   const headers = { Accept: 'application/json', Origin: base };
   if (session?.cookie) headers.Cookie = session.cookie;
   if (payload !== undefined) {
     headers['Content-Type'] = 'application/json';
     headers['X-PaperPath-CSRF'] = session.csrf;
   }
-  const response = await fetch(new URL(route, base), {
+  const response = await fetch(url, {
     method, headers, body: payload === undefined ? undefined : JSON.stringify(payload),
-    signal: AbortSignal.timeout(timeoutMs), redirect: 'manual'
+    signal: AbortSignal.timeout(requestTimeoutMs), redirect: 'manual'
   });
   const raw = await response.text();
   let json;
@@ -175,7 +181,9 @@ async function api(method, route, session, payload) {
   return { status: response.status, json };
 }
 async function localFetch(input, init = {}) {
-  const response = await fetch(input, { ...init, redirect: 'manual' });
+  const url = input instanceof URL ? input : new URL(input);
+  if (url.origin !== base || url.hostname !== '127.0.0.1') throw new Error('local-fetch-origin-rejected');
+  const response = await fetch(url, { ...init, redirect: 'manual' });
   if (response.status >= 300 && response.status < 400) throw new Error('unexpected-local-redirect');
   return response;
 }
@@ -611,9 +619,29 @@ try {
         return;
       }
       if (failNext) { failNext = false; finishProvider(res, 400); return; }
+      const providerMode = nextProviderMode;
+      nextProviderMode = undefined;
+      if (providerMode === '429') { finishProvider(res, 429); return; }
+      if (providerMode === '5xx') { finishProvider(res, 503); return; }
+      if (providerMode === 'malformed') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{malformed');
+        return;
+      }
+      if (providerMode === 'timeout') {
+        req.setTimeout(20000, () => res.destroy(new Error('mock-request-timeout')));
+        held.push(res);
+        return;
+      }
       if (holdNextProviderResponse) { holdNextProviderResponse = false; held.push(res); return; }
       if (providerCalls <= 2) { held.push(res); return; }
       if (unsupportedFactNext) { unsupportedFactNext = false; finishProvider(res, 200, true); return; }
+      if (conflictingFactNext) {
+        conflictingFactNext = false;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(toolResponse(false, true));
+        return;
+      }
       finishProvider(res);
     });
   });
@@ -632,7 +660,6 @@ const mockBase=${JSON.stringify(mockBase)};
 const dispatchFailureKey=${JSON.stringify(completionDispatchFailureKey)};
 const unsupportedKey=${JSON.stringify(unsupportedCompletionKey)};
 const unsupportedEvidenceKey=${JSON.stringify(unsupportedEvidenceCompletionKey)};
-const conflictingKey=${JSON.stringify(conflictingCompletionKey)};
 const lostResponseKey=${JSON.stringify(lostCompletionResponseKey)};
 const dispatchFailureMarker=${JSON.stringify(dispatchFailureMarker)};
 const responseLossMarker=${JSON.stringify(responseLossMarker)};
@@ -657,9 +684,9 @@ globalThis.fetch=async(input,init={})=>{
   else if(u.origin===appBase && u.hostname==='127.0.0.1') target=input;
   else throw new Error('network-guard-rejected');
   const key=u.pathname==='/mcp'?completionKey(input,init):undefined;
-  if(key===unsupportedKey||key===unsupportedEvidenceKey||key===conflictingKey){
+  if(key===unsupportedKey||key===unsupportedEvidenceKey){
     const request=JSON.parse(typeof init.body==='string'?init.body:new TextDecoder().decode(init.body));
-    const code=key===unsupportedKey?'UNSUPPORTED_FACT':key===unsupportedEvidenceKey?'UNSUPPORTED_EVIDENCE':'IDEMPOTENCY_CONFLICT';
+    const code=key===unsupportedKey?'UNSUPPORTED_FACT':'UNSUPPORTED_EVIDENCE';
     return new Response(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{isError:true,content:[{type:'text',text:code}]}}),
       {status:200,headers:{'content-type':'application/json'}});
   }
@@ -723,6 +750,11 @@ globalThis.fetch=async(input,init={})=>{
   assert.equal(createB.status, 200);
   const caseA = createA.json.packet;
   const caseB = createB.json.packet;
+  assert.deepEqual(createB.json.validation, {
+    complete: false,
+    missing: ['name', 'email', 'availability', 'equipment'],
+    conflicts: []
+  }, 'a newly created production Store packet exposes every missing required fact');
   const messageKey = `msg_${randomUUID()}`;
   const textA = 'Hello Morgan Bell, please confirm the north gate shift.';
   const textB = 'Hello Morgan Bell, please confirm the south gate shift.';
@@ -767,6 +799,53 @@ globalThis.fetch=async(input,init={})=>{
   assert.equal(retry.json.error, 'MESSAGE_PENDING');
   assert.equal(providerCalls, beforeFailure + 1, 'unknown provider outcome stays pending without another call');
 
+  const ownerAId = ownerA.cookie.slice('paperpath_session='.length);
+  const mainDb = new DatabaseSync(path.join(dataDir, 'paperpath.sqlite'));
+  const mainMessageSnapshot = (key, caseId = caseA.id, ownerId = ownerAId) => ({
+    operation: mainDb.prepare('SELECT * FROM operations WHERE owner=? AND key=?').all(ownerId, key),
+    reservation: mainDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerId, key),
+    packet: mainDb.prepare('SELECT revision,body FROM cases WHERE id=?').get(caseId),
+    exports: mainDb.prepare('SELECT * FROM exports WHERE case_id=? ORDER BY id').all(caseId)
+  });
+  async function verifyProviderFailureMode(mode, timeout = timeoutMs) {
+    const body = {
+      expectedRevision: proofA.packet.revision,
+      idempotencyKey: `msg_${randomUUID()}`,
+      text: `Morgan Bell follow-up provider failure ${mode}.`
+    };
+    const beforeState = mainMessageSnapshot(body.idempotencyKey);
+    const beforeCalls = providerCalls;
+    nextProviderMode = mode;
+    const requestStartedAt = Date.now();
+    const failedResponse = await api('POST', messagePathA, ownerA, body, timeout);
+    const elapsedMs = Date.now() - requestStartedAt;
+    assert.equal(failedResponse.status, 409, `${mode} outcome remains pending`);
+    assert.equal(failedResponse.json.error, 'MESSAGE_PENDING', `${mode} outcome is reported as pending`);
+    if (mode === 'timeout') assert.ok(elapsedMs >= 14500, `production provider timeout elapsed for ${elapsedMs}ms`);
+    assert.equal(providerCalls, beforeCalls + 1, `${mode} issues exactly one provider request`);
+    const pendingState = mainMessageSnapshot(body.idempotencyKey);
+    assert.equal(pendingState.operation.length, 0, `${mode} writes no operation`);
+    assert.equal(pendingState.reservation.length, 1, `${mode} keeps its reservation pending`);
+    const attemptToken = pendingState.reservation[0]?.attempt_token;
+    assert.match(attemptToken, /^[a-f0-9]{32}$/, `${mode} retains its acquired attempt token`);
+    assert.deepEqual(pendingState.packet, beforeState.packet, `${mode} preserves case facts and revision`);
+    assert.deepEqual(pendingState.exports, beforeState.exports, `${mode} preserves export state`);
+    const replay = await api('POST', messagePathA, ownerA, body);
+    assert.equal(replay.status, 409, `${mode} same-key replay remains pending`);
+    assert.equal(replay.json.error, 'MESSAGE_PENDING');
+    assert.equal(providerCalls, beforeCalls + 1, `${mode} same-key replay does not call provider again`);
+    const replayState = mainMessageSnapshot(body.idempotencyKey);
+    assert.equal(replayState.reservation[0]?.attempt_token, attemptToken,
+      `${mode} same-key replay preserves the acquired attempt token`);
+    assert.deepEqual(replayState, pendingState,
+      `${mode} same-key replay preserves the pending reservation and case/export state`);
+  }
+  await verifyProviderFailureMode('429');
+  await verifyProviderFailureMode('5xx');
+  await verifyProviderFailureMode('malformed');
+  await verifyProviderFailureMode('timeout', 20000);
+  releaseHeld();
+
   const completionFailureText = 'Morgan Bell asked us to confirm the north gate schedule.';
   const completionFailureBody = {
     expectedRevision: proofA.packet.revision,
@@ -781,13 +860,6 @@ globalThis.fetch=async(input,init={})=>{
     'one successful extraction precedes the injected MCP dispatch failure');
   assert.equal(await readFile(path.join(dataDir, 'completion-dispatch-failure.injected'), 'utf8'), 'injected');
 
-  const ownerAId = ownerA.cookie.slice('paperpath_session='.length);
-  const mainDb = new DatabaseSync(path.join(dataDir, 'paperpath.sqlite'));
-  const mainMessageSnapshot = key => ({
-    operation: mainDb.prepare('SELECT * FROM operations WHERE owner=? AND key=?').all(ownerAId, key),
-    reservation: mainDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerAId, key),
-    packet: mainDb.prepare('SELECT revision,body FROM cases WHERE id=?').get(caseA.id)
-  });
   const unsupportedBody = {
     expectedRevision: proofA.packet.revision,
     idempotencyKey: unsupportedCompletionKey,
@@ -855,23 +927,76 @@ globalThis.fetch=async(input,init={})=>{
   assert.equal(providerCalls, beforeDomainUnsupported + 1,
     'same-key replay after the production domain rejection does not reinfer');
 
+  const conflictCaseCreate = await api('POST', '/api/cases', ownerA, {
+    idempotencyKey: `caseConflict_${randomUUID()}`
+  });
+  assert.equal(conflictCaseCreate.status, 200);
+  let conflictCase = conflictCaseCreate.json.packet;
+  const conflictCasePath = `/api/cases/${conflictCase.id}`;
+  for (const [field, value] of [
+    ['name', 'Taylor Synthetic'],
+    ['email', 'taylor@example.test'],
+    ['availability', 'Saturday mornings'],
+    ['equipment', false]
+  ]) {
+    const correction = await api('POST', `${conflictCasePath}/correct`, ownerA, {
+      expectedRevision: conflictCase.revision,
+      idempotencyKey: `correct_${randomUUID()}`,
+      field,
+      value
+    });
+    assert.equal(correction.status, 200, `synthetic ${field} correction is accepted`);
+    conflictCase = correction.json.packet;
+  }
+  assert.deepEqual((await api('GET', conflictCasePath, ownerA)).json.validation, {
+    complete: true, missing: [], conflicts: []
+  }, 'the separate conflict fixture starts complete');
+
   const conflictingBody = {
-    expectedRevision: proofA.packet.revision,
+    expectedRevision: conflictCase.revision,
     idempotencyKey: conflictingCompletionKey,
-    text: 'Morgan Bell asked us to confirm the north gate schedule.'
+    text: 'Nora Grey asked us to confirm the north gate schedule.'
   };
   const beforeConflicting = providerCalls;
-  const conflicting = await api('POST', messagePathA, ownerA, conflictingBody);
-  assert.equal(conflicting.status, 409);
-  assert.equal(conflicting.json.error, 'MESSAGE_PENDING', 'completion conflict remains generic pending');
+  conflictingFactNext = true;
+  const conflictMessagePath = `${conflictCasePath}/message`;
+  const conflicting = await api('POST', conflictMessagePath, ownerA, conflictingBody);
+  assert.equal(conflicting.status, 200, 'a conflicting but supported candidate reaches the production Store');
   assert.equal(providerCalls, beforeConflicting + 1, 'conflicting completion follows exactly one extraction');
-  const conflictingSnapshot = mainMessageSnapshot(conflictingCompletionKey);
-  assert.equal(conflictingSnapshot.operation.length, 0, 'conflicting completion writes no operation');
-  assert.equal(conflictingSnapshot.reservation.length, 1, 'conflicting completion keeps reservation pending');
-  assert.equal(conflictingSnapshot.packet.revision, proofA.packet.revision, 'conflicting completion leaves case unchanged');
-  const conflictingReplay = await api('POST', messagePathA, ownerA, conflictingBody);
-  assert.equal(conflictingReplay.status, 409);
-  assert.equal(conflictingReplay.json.error, 'MESSAGE_PENDING');
+  assert.deepEqual(conflicting.json.validation, {
+    complete: false,
+    missing: [],
+    conflicts: ['name']
+  });
+  assert.equal(conflicting.json.packet.facts.name.value, 'Taylor Synthetic', 'the canonical fact remains unchanged');
+  assert.deepEqual(conflicting.json.packet.facts.name.conflicts.map(item => item.value), ['Nora Grey'],
+    'the production Store exposes the conflicting candidate for review');
+  assert.equal(conflicting.json.packet.revision, conflictCase.revision + 1);
+  const postConflictRevision = conflicting.json.packet.revision;
+  assert.equal(conflicting.json.packet.confirmedRevision, null, 'conflict leaves the packet unconfirmed');
+  const conflictingSnapshot = mainMessageSnapshot(conflictingCompletionKey, conflictCase.id);
+  assert.equal(conflictingSnapshot.operation.length, 1, 'conflicting completion is durably recorded');
+  assert.equal(conflictingSnapshot.reservation.length, 0, 'completed conflict releases its reservation');
+  assert.equal(conflictingSnapshot.packet.revision, postConflictRevision);
+  const confirmConflict = await api('POST', `${conflictCasePath}/confirm`, ownerA, {
+    expectedRevision: postConflictRevision,
+    idempotencyKey: `confirmConflict_${randomUUID()}`,
+    iConfirm: true
+  });
+  assert.equal(confirmConflict.status, 400);
+  assert.equal(confirmConflict.json.error, 'INCOMPLETE_PACKET');
+  const exportConflict = await api('POST', `${conflictCasePath}/export`, ownerA, {
+    expectedRevision: postConflictRevision,
+    idempotencyKey: `exportConflict_${randomUUID()}`
+  });
+  assert.equal(exportConflict.status, 400);
+  assert.equal(exportConflict.json.error, 'INCOMPLETE_PACKET');
+  const conflictReplayState = await api('GET', conflictCasePath, ownerA);
+  assert.equal(conflictReplayState.json.packet.confirmedRevision, null);
+  assert.deepEqual(conflictReplayState.json.validation, { complete: false, missing: [], conflicts: ['name'] });
+  const conflictingReplay = await api('POST', conflictMessagePath, ownerA, conflictingBody);
+  assert.equal(conflictingReplay.status, 200);
+  assert.deepEqual(conflictingReplay, conflicting, 'same-key replay preserves the visible Store conflict');
   assert.equal(providerCalls, beforeConflicting + 1, 'conflicting completion replay does not reinfer');
 
   let dispatchFailureSnapshot;
@@ -997,13 +1122,14 @@ globalThis.fetch=async(input,init={})=>{
   const adapterResult = await verifyAdapterCompletion();
   const result = {
     schema: 'paperpath-message-single-flight-test-v1', result: 'PASS',
-    providerEndpointGuarded: true, providerCalls: 10,
+    providerEndpointGuarded: true, providerCalls: 14,
     firstWaveCalls: 2, ownerIsolation: true, identicalDedup: true, changedPayload409: true,
     committedReplayNoProviderCall: true, unknownFailureRemainsPendingWithoutRetry: true,
+    providerFailureMatrixPreservesPendingStateWithoutRetry: true,
     completionMcpFailureLeavesReservationPendingWithoutRetry: true,
     unsupportedCompletionReturnsClarificationWithoutMutationOrRetry: true,
     productionDomainUnsupportedFactReturnsSanitizedClarificationWithoutMutationOrRetry: true,
-    conflictingCompletionRemainsPendingWithoutMutationOrRetry: true,
+    conflictingCompletionReachesStoreAndRemainsVisibleWithoutRetry: true,
     lostCompletionResponseReplayDiscoversCommitWithoutRetry: true,
     midflightProcessCrashRemainsPendingWithoutRetry: true,
     sourceEvidenceVerifiedForBothOwners: true,
