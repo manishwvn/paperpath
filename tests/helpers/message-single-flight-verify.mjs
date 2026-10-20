@@ -20,6 +20,7 @@ let providerCalls = 0;
 let failNext = false;
 let holdNextProviderResponse = false;
 let unsupportedFactNext = false;
+let conflictingFactNext = false;
 let child;
 let childExit;
 let mock;
@@ -61,10 +62,12 @@ function waitUntil(predicate, label, ms = timeoutMs) {
     poll();
   });
 }
-function toolResponse(unsupportedFact = false) {
+function toolResponse(unsupportedFact = false, conflictingFact = false) {
+  const value = unsupportedFact ? 'Jordan Lee' : conflictingFact ? 'Nora Grey' : 'Morgan Bell';
+  const quote = conflictingFact ? 'Nora Grey' : 'Morgan Bell';
   return JSON.stringify({ choices: [{ message: { role: 'assistant', tool_calls: [{ type: 'function', function: {
     name: 'propose_facts', arguments: JSON.stringify({ candidates: [{
-      field: 'name', value: unsupportedFact ? 'Jordan Lee' : 'Morgan Bell', quote: 'Morgan Bell'
+      field: 'name', value, quote
     }] })
   } }] }, finish_reason: 'tool_calls' }] });
 }
@@ -159,13 +162,15 @@ function cleanup() {
   return cleanupTask;
 }
 async function api(method, route, session, payload) {
+  const url = new URL(route, base);
+  if (url.origin !== base || url.hostname !== '127.0.0.1') throw new Error('api-origin-rejected');
   const headers = { Accept: 'application/json', Origin: base };
   if (session?.cookie) headers.Cookie = session.cookie;
   if (payload !== undefined) {
     headers['Content-Type'] = 'application/json';
     headers['X-PaperPath-CSRF'] = session.csrf;
   }
-  const response = await fetch(new URL(route, base), {
+  const response = await fetch(url, {
     method, headers, body: payload === undefined ? undefined : JSON.stringify(payload),
     signal: AbortSignal.timeout(timeoutMs), redirect: 'manual'
   });
@@ -175,7 +180,9 @@ async function api(method, route, session, payload) {
   return { status: response.status, json };
 }
 async function localFetch(input, init = {}) {
-  const response = await fetch(input, { ...init, redirect: 'manual' });
+  const url = input instanceof URL ? input : new URL(input);
+  if (url.origin !== base || url.hostname !== '127.0.0.1') throw new Error('local-fetch-origin-rejected');
+  const response = await fetch(url, { ...init, redirect: 'manual' });
   if (response.status >= 300 && response.status < 400) throw new Error('unexpected-local-redirect');
   return response;
 }
@@ -614,6 +621,12 @@ try {
       if (holdNextProviderResponse) { holdNextProviderResponse = false; held.push(res); return; }
       if (providerCalls <= 2) { held.push(res); return; }
       if (unsupportedFactNext) { unsupportedFactNext = false; finishProvider(res, 200, true); return; }
+      if (conflictingFactNext) {
+        conflictingFactNext = false;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(toolResponse(false, true));
+        return;
+      }
       finishProvider(res);
     });
   });
@@ -632,7 +645,6 @@ const mockBase=${JSON.stringify(mockBase)};
 const dispatchFailureKey=${JSON.stringify(completionDispatchFailureKey)};
 const unsupportedKey=${JSON.stringify(unsupportedCompletionKey)};
 const unsupportedEvidenceKey=${JSON.stringify(unsupportedEvidenceCompletionKey)};
-const conflictingKey=${JSON.stringify(conflictingCompletionKey)};
 const lostResponseKey=${JSON.stringify(lostCompletionResponseKey)};
 const dispatchFailureMarker=${JSON.stringify(dispatchFailureMarker)};
 const responseLossMarker=${JSON.stringify(responseLossMarker)};
@@ -657,9 +669,9 @@ globalThis.fetch=async(input,init={})=>{
   else if(u.origin===appBase && u.hostname==='127.0.0.1') target=input;
   else throw new Error('network-guard-rejected');
   const key=u.pathname==='/mcp'?completionKey(input,init):undefined;
-  if(key===unsupportedKey||key===unsupportedEvidenceKey||key===conflictingKey){
+  if(key===unsupportedKey||key===unsupportedEvidenceKey){
     const request=JSON.parse(typeof init.body==='string'?init.body:new TextDecoder().decode(init.body));
-    const code=key===unsupportedKey?'UNSUPPORTED_FACT':key===unsupportedEvidenceKey?'UNSUPPORTED_EVIDENCE':'IDEMPOTENCY_CONFLICT';
+    const code=key===unsupportedKey?'UNSUPPORTED_FACT':'UNSUPPORTED_EVIDENCE';
     return new Response(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{isError:true,content:[{type:'text',text:code}]}}),
       {status:200,headers:{'content-type':'application/json'}});
   }
@@ -723,6 +735,11 @@ globalThis.fetch=async(input,init={})=>{
   assert.equal(createB.status, 200);
   const caseA = createA.json.packet;
   const caseB = createB.json.packet;
+  assert.deepEqual(createB.json.validation, {
+    complete: false,
+    missing: ['name', 'email', 'availability', 'equipment'],
+    conflicts: []
+  }, 'a newly created production Store packet exposes every missing required fact');
   const messageKey = `msg_${randomUUID()}`;
   const textA = 'Hello Morgan Bell, please confirm the north gate shift.';
   const textB = 'Hello Morgan Bell, please confirm the south gate shift.';
@@ -783,10 +800,10 @@ globalThis.fetch=async(input,init={})=>{
 
   const ownerAId = ownerA.cookie.slice('paperpath_session='.length);
   const mainDb = new DatabaseSync(path.join(dataDir, 'paperpath.sqlite'));
-  const mainMessageSnapshot = key => ({
-    operation: mainDb.prepare('SELECT * FROM operations WHERE owner=? AND key=?').all(ownerAId, key),
-    reservation: mainDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerAId, key),
-    packet: mainDb.prepare('SELECT revision,body FROM cases WHERE id=?').get(caseA.id)
+  const mainMessageSnapshot = (key, caseId = caseA.id, ownerId = ownerAId) => ({
+    operation: mainDb.prepare('SELECT * FROM operations WHERE owner=? AND key=?').all(ownerId, key),
+    reservation: mainDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerId, key),
+    packet: mainDb.prepare('SELECT revision,body FROM cases WHERE id=?').get(caseId)
   });
   const unsupportedBody = {
     expectedRevision: proofA.packet.revision,
@@ -855,23 +872,76 @@ globalThis.fetch=async(input,init={})=>{
   assert.equal(providerCalls, beforeDomainUnsupported + 1,
     'same-key replay after the production domain rejection does not reinfer');
 
+  const conflictCaseCreate = await api('POST', '/api/cases', ownerA, {
+    idempotencyKey: `caseConflict_${randomUUID()}`
+  });
+  assert.equal(conflictCaseCreate.status, 200);
+  let conflictCase = conflictCaseCreate.json.packet;
+  const conflictCasePath = `/api/cases/${conflictCase.id}`;
+  for (const [field, value] of [
+    ['name', 'Taylor Synthetic'],
+    ['email', 'taylor@example.test'],
+    ['availability', 'Saturday mornings'],
+    ['equipment', false]
+  ]) {
+    const correction = await api('POST', `${conflictCasePath}/correct`, ownerA, {
+      expectedRevision: conflictCase.revision,
+      idempotencyKey: `correct_${randomUUID()}`,
+      field,
+      value
+    });
+    assert.equal(correction.status, 200, `synthetic ${field} correction is accepted`);
+    conflictCase = correction.json.packet;
+  }
+  assert.deepEqual((await api('GET', conflictCasePath, ownerA)).json.validation, {
+    complete: true, missing: [], conflicts: []
+  }, 'the separate conflict fixture starts complete');
+
   const conflictingBody = {
-    expectedRevision: proofA.packet.revision,
+    expectedRevision: conflictCase.revision,
     idempotencyKey: conflictingCompletionKey,
-    text: 'Morgan Bell asked us to confirm the north gate schedule.'
+    text: 'Nora Grey asked us to confirm the north gate schedule.'
   };
   const beforeConflicting = providerCalls;
-  const conflicting = await api('POST', messagePathA, ownerA, conflictingBody);
-  assert.equal(conflicting.status, 409);
-  assert.equal(conflicting.json.error, 'MESSAGE_PENDING', 'completion conflict remains generic pending');
+  conflictingFactNext = true;
+  const conflictMessagePath = `${conflictCasePath}/message`;
+  const conflicting = await api('POST', conflictMessagePath, ownerA, conflictingBody);
+  assert.equal(conflicting.status, 200, 'a conflicting but supported candidate reaches the production Store');
   assert.equal(providerCalls, beforeConflicting + 1, 'conflicting completion follows exactly one extraction');
-  const conflictingSnapshot = mainMessageSnapshot(conflictingCompletionKey);
-  assert.equal(conflictingSnapshot.operation.length, 0, 'conflicting completion writes no operation');
-  assert.equal(conflictingSnapshot.reservation.length, 1, 'conflicting completion keeps reservation pending');
-  assert.equal(conflictingSnapshot.packet.revision, proofA.packet.revision, 'conflicting completion leaves case unchanged');
-  const conflictingReplay = await api('POST', messagePathA, ownerA, conflictingBody);
-  assert.equal(conflictingReplay.status, 409);
-  assert.equal(conflictingReplay.json.error, 'MESSAGE_PENDING');
+  assert.deepEqual(conflicting.json.validation, {
+    complete: false,
+    missing: [],
+    conflicts: ['name']
+  });
+  assert.equal(conflicting.json.packet.facts.name.value, 'Taylor Synthetic', 'the canonical fact remains unchanged');
+  assert.deepEqual(conflicting.json.packet.facts.name.conflicts.map(item => item.value), ['Nora Grey'],
+    'the production Store exposes the conflicting candidate for review');
+  assert.equal(conflicting.json.packet.revision, conflictCase.revision + 1);
+  const postConflictRevision = conflicting.json.packet.revision;
+  assert.equal(conflicting.json.packet.confirmedRevision, null, 'conflict leaves the packet unconfirmed');
+  const conflictingSnapshot = mainMessageSnapshot(conflictingCompletionKey, conflictCase.id);
+  assert.equal(conflictingSnapshot.operation.length, 1, 'conflicting completion is durably recorded');
+  assert.equal(conflictingSnapshot.reservation.length, 0, 'completed conflict releases its reservation');
+  assert.equal(conflictingSnapshot.packet.revision, postConflictRevision);
+  const confirmConflict = await api('POST', `${conflictCasePath}/confirm`, ownerA, {
+    expectedRevision: postConflictRevision,
+    idempotencyKey: `confirmConflict_${randomUUID()}`,
+    iConfirm: true
+  });
+  assert.equal(confirmConflict.status, 400);
+  assert.equal(confirmConflict.json.error, 'INCOMPLETE_PACKET');
+  const exportConflict = await api('POST', `${conflictCasePath}/export`, ownerA, {
+    expectedRevision: postConflictRevision,
+    idempotencyKey: `exportConflict_${randomUUID()}`
+  });
+  assert.equal(exportConflict.status, 400);
+  assert.equal(exportConflict.json.error, 'INCOMPLETE_PACKET');
+  const conflictReplayState = await api('GET', conflictCasePath, ownerA);
+  assert.equal(conflictReplayState.json.packet.confirmedRevision, null);
+  assert.deepEqual(conflictReplayState.json.validation, { complete: false, missing: [], conflicts: ['name'] });
+  const conflictingReplay = await api('POST', conflictMessagePath, ownerA, conflictingBody);
+  assert.equal(conflictingReplay.status, 200);
+  assert.deepEqual(conflictingReplay, conflicting, 'same-key replay preserves the visible Store conflict');
   assert.equal(providerCalls, beforeConflicting + 1, 'conflicting completion replay does not reinfer');
 
   let dispatchFailureSnapshot;
@@ -1003,7 +1073,7 @@ globalThis.fetch=async(input,init={})=>{
     completionMcpFailureLeavesReservationPendingWithoutRetry: true,
     unsupportedCompletionReturnsClarificationWithoutMutationOrRetry: true,
     productionDomainUnsupportedFactReturnsSanitizedClarificationWithoutMutationOrRetry: true,
-    conflictingCompletionRemainsPendingWithoutMutationOrRetry: true,
+    conflictingCompletionReachesStoreAndRemainsVisibleWithoutRetry: true,
     lostCompletionResponseReplayDiscoversCommitWithoutRetry: true,
     midflightProcessCrashRemainsPendingWithoutRetry: true,
     sourceEvidenceVerifiedForBothOwners: true,

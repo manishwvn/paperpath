@@ -50,7 +50,7 @@ test('message requests preserve owner-scoped replay and pending behavior over HT
   assert.equal(result.completionMcpFailureLeavesReservationPendingWithoutRetry, true);
   assert.equal(result.unsupportedCompletionReturnsClarificationWithoutMutationOrRetry, true);
   assert.equal(result.productionDomainUnsupportedFactReturnsSanitizedClarificationWithoutMutationOrRetry, true);
-  assert.equal(result.conflictingCompletionRemainsPendingWithoutMutationOrRetry, true);
+  assert.equal(result.conflictingCompletionReachesStoreAndRemainsVisibleWithoutRetry, true);
   assert.equal(result.lostCompletionResponseReplayDiscoversCommitWithoutRetry, true);
   assert.equal(result.midflightProcessCrashRemainsPendingWithoutRetry, true);
   const adapterResult = result.mcpAdapterCompletion as Record<string, unknown>;
