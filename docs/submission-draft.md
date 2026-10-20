@@ -41,7 +41,7 @@ The last command must print `5b2205cf6e6ecd6693f453bfc101b24d800e2e63`. This pin
 - **Video URL:** [Public reviewed demo](https://youtu.be/KOGpO7Dg23g). Public title metadata returned HTTP 200 in a point-in-time oEmbed check. This does not guarantee continued playback or maintained judge access.
 - **Mini-challenges / additional tracks:** **Not selected or verified.**
 - **Public demo and judge access:** The reviewed demo has a public URL. Maintained judge access and signed-out access to the updated evaluator guide remain unverified. Hosting is optional under the event FAQ; no host or deployment is claimed.
-- **Submission status:** **Not submitted.** Devpost remains a saved draft at 3/5 steps. Submitter type, residence country, age-of-majority, eligible-jurisdiction, and promotion-entity employment/agency declarations remain unanswered; no personal eligibility answer is inferred. Rules eligibility, signed-out access, and final Devpost preflight remain open.
+- **Submission status:** **Not submitted.** Devpost remains a saved draft at 3/5 steps. Required eligibility declarations are recorded privately; their values are omitted from this public draft. Rules eligibility, signed-out access, and final Devpost preflight remain open. Final submission remains on hold pending explicit user approval.
 
 ## Proposed 2:40 demo script
 
@@ -57,4 +57,4 @@ This 2:40 script remains a proposed continuous recording outline, separate from 
 | 1:55–2:20 | Export the packet, open both PDFs, and point to the matching applicant, availability, and equipment answers. Check the PDFs for matching text and readable rendering; do not present an older receipt as a new execution. |
 | 2:20–2:40 | Close with the actual verification boundary: “The current demo shows one unsupported Groq result; it does not show a successful current extraction. I manually corrected a synthetic value, confirmed the practice case, and exported both PDFs. Current-source browser clarification proof uses deterministic synthetic fixtures; it does not establish successful live extraction. This does not submit a real application.” |
 
-The public demo is published and the known Devpost fields are saved; the draft remains at 3/5 steps and is not submitted. The required submitter type, residence country, age-of-majority, eligible-jurisdiction, and promotion-entity employment/agency declarations remain unanswered. Maintained judge access and signed-out access to the updated public evaluator guide remain open. Do not infer personal eligibility or mark the submission complete.
+The public demo is published and the known Devpost fields are saved; the draft remains at 3/5 steps and is not submitted. Required eligibility declarations are recorded privately; their values are omitted from this public draft. Maintained judge access and signed-out access to the updated public evaluator guide remain open. Final submission remains on hold pending explicit user approval.

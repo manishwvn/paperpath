@@ -34,6 +34,8 @@ Open <http://127.0.0.1:4317>. Keep the server terminal open while using the app.
 
 ## Create and correct a synthetic case
 
+The published video is an edited screenshot sequence from a separate fictional case. Its current revision-12 PDFs show “Weekday evenings, 6–8 p.m.” and “Equipment requested: No.” The optional walkthrough below uses different fictional inputs, including Wednesdays; do not treat those walkthrough values as the contents of the public video or its PDFs.
+
 1. Select **Start new case**.
 2. In **Correct a fact**, choose each field and apply these fictional values:
 
