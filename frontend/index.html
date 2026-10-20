@@ -7,143 +7,187 @@
 <title>PaperPath — Community Help Desk Simulator</title>
 <link rel="stylesheet" href="./styles.css">
 </head>
-<body>
+<body data-case-active="false">
 <a class="skip-link" href="#main">Skip to main content</a>
 <header class="site-header">
-<div class="wrap">
-<p class="eyebrow">Openly labelled Alexa+ simulator for practice</p>
-<h1 id="site-title">PaperPath community help desk</h1>
-<p class="lede">Get help preparing a volunteer application. The desk shows evidence-backed facts, marks unknown or conflicting answers as unknown, and keeps a draft status until you confirm for practice.</p>
-<p class="simulator-note">This is a simulator for learning. It does not connect to the Alexa+ service, does not accept arbitrary PDFs, has no agency endorsement, and does not submit a production application.</p>
-<section class="card" aria-labelledby="case-controls-heading">
-<h2 id="case-controls-heading">Case</h2>
-<p id="case-controls-help">Start a new practice case, or resume with a case ID you already have.</p>
-<div class="case-row">
-<div class="field">
-<label for="case-id-input">Case ID to resume</label>
-<input id="case-id-input" name="caseId" type="text" autocomplete="off" placeholder="e.g. practice-1234" aria-describedby="case-controls-help">
-</div>
-<div class="button-row">
-<button type="button" id="case-create-button">Start new case</button>
-<button type="button" id="case-resume-button" disabled>Resume case</button>
-</div>
-</div>
-</section>
-</div>
+  <div class="wrap masthead">
+    <div class="brandline"><span class="brand-mark" aria-hidden="true">P</span><span>PaperPath <span class="brand-divider">/</span> Practice desk</span></div>
+    <p class="eyebrow">Openly labelled Alexa+ simulator for practice</p>
+    <h1 id="site-title">Tell us once. Get two forms that agree.</h1>
+    <p class="lede">Build a practice packet from one conversation, then review both forms before export.</p>
+    <details class="simulator-note">
+      <summary>About this practice simulator</summary>
+      <p>This simulator does not connect to Alexa+, accept arbitrary PDFs, carry agency endorsement, or submit a production application.</p>
+    </details>
+    <details class="workflow">
+      <summary>How the packet comes together</summary>
+      <nav aria-label="Practice packet steps">
+        <ol>
+          <li><a href="#message-form"><span class="step-number">1</span><span><strong>Describe</strong><small>Share the details</small></span></a></li>
+          <li><a href="#correction-form"><span class="step-number">2</span><span><strong>Resolve</strong><small>Correct gaps</small></span></a></li>
+          <li><a href="#confirmation-heading"><span class="step-number">3</span><span><strong>Review</strong><small>Check both forms</small></span></a></li>
+          <li><a href="#export-heading"><span class="step-number">4</span><span><strong>Download</strong><small>Keep current copies</small></span></a></li>
+        </ol>
+      </nav>
+    </details>
+    <section class="case-controls" aria-labelledby="case-controls-heading">
+      <h2 id="case-controls-heading">Practice case</h2>
+      <p id="case-controls-help">Start a packet or resume one with a case ID you already have.</p>
+      <div id="case-feedback" role="status" aria-live="polite" hidden></div>
+      <div id="case-error-feedback" role="alert" hidden></div>
+      <button type="button" id="case-create-button" class="start-case-button">Start practice packet</button>
+      <details class="resume-disclosure">
+        <summary>Resume a saved case</summary>
+        <p class="resume-safety">If a message reports that it may still be pending, keep its text and do not send it again. Resume checks the latest saved case; it cannot determine whether an earlier provider request is still in flight. Review the case, then use manual correction if needed.</p>
+        <div class="case-row">
+          <div class="field">
+            <label for="case-id-input">Case ID to resume</label>
+            <input id="case-id-input" name="caseId" type="text" autocomplete="off" placeholder="Paste a saved case ID" aria-describedby="case-controls-help">
+          </div>
+          <button type="button" id="case-resume-button" disabled>Resume case</button>
+        </div>
+      </details>
+    </section>
+  </div>
 </header>
 <main id="main">
-<div class="wrap desk-layout">
-<section class="card" aria-labelledby="conversation-heading">
-<h2 id="conversation-heading">Conversation</h2>
-<p>Ask questions in your own words. Case data is stored by the locally running PaperPath server on this computer. Text submitted for analysis is sent to Groq to suggest draft facts for review.</p>
-<div id="status-message" role="status" aria-live="polite">Welcome. API state is not loaded yet. Controls stay disabled until the next step enables them.</div>
-<p id="provider-notice" role="status" aria-live="polite" hidden>Provider is not ready. You can still correct facts manually and export the current draft.</p>
-<div id="error-message" role="alert"></div>
-<section aria-labelledby="message-history-heading">
-<h3 id="message-history-heading">Messages</h3>
-<ol id="message-list">
-<li class="placeholder">No messages yet. Your conversation will appear here as a readable list.</li>
-</ol>
-</section>
-<form id="message-form" aria-labelledby="conversation-heading">
-<div class="field">
-<label for="message-input">Your message</label>
-<p class="hint" id="message-input-hint">Describe availability, equipment, contact details, or motivation.</p>
-<textarea id="message-input" name="message" rows="4" aria-describedby="message-input-hint" placeholder="Example: I am available weekday evenings and need a loan laptop."></textarea>
-</div>
-<button type="submit" id="message-submit" disabled>Send message</button>
-</form>
-<section aria-labelledby="correction-heading">
-<h3 id="correction-heading">Correct a fact</h3>
-<p id="correction-note">One availability correction is shared by both forms below. Updating it changes the volunteer application and the availability and equipment request together.</p>
-<form id="correction-form" aria-describedby="correction-note">
-<div class="field">
-<label for="correction-field">Field to correct</label>
-<select id="correction-field" name="field">
-<option value="name">Name</option>
-<option value="email">Email</option>
-<option value="availability">Availability</option>
-<option value="equipment">Equipment</option>
-<option value="motivation">Motivation</option>
-</select>
-</div>
-<div class="field">
-<label for="correction-availability-input" id="correction-value-label">Corrected availability</label>
-<input id="correction-availability-input" name="availability" type="text" autocomplete="off" placeholder="e.g. weekday evenings">
-</div>
-<div class="field" hidden>
-<label for="correction-equipment-input">Corrected equipment</label>
-<select id="correction-equipment-input" name="equipment" hidden>
-<option value="">Choose an answer</option>
-<option value="true">Needed</option>
-<option value="false">Not needed</option>
-</select>
-</div>
-<button type="submit" id="correction-availability-apply" disabled>Apply shared availability correction</button>
-</form>
-</section>
-<section aria-labelledby="confirmation-heading">
-<h3 id="confirmation-heading">Review personal facts</h3>
-<p id="confirmation-note">Status stays as draft until you confirm for practice. This is practice only and is not a real applicant confirmation.</p>
-<div class="check-row">
-<input type="checkbox" id="facts-confirm-checkbox">
-<label for="facts-confirm-checkbox">I have reviewed name, email, availability, equipment, and motivation. Unknown items are shown as unknown.</label>
-</div>
-<button type="button" id="facts-confirm-button" disabled>Confirm facts for practice</button>
-</section>
-</section>
-<section class="card packet" aria-labelledby="packet-heading">
-<h2 id="packet-heading">Packet review</h2>
-<p>Status: <strong id="packet-status">Draft — not yet confirmed for practice</strong></p>
-<p>Conflicting or missing answers stay visibly unknown. Evidence explains where each draft fact came from.</p>
-<section aria-labelledby="evidence-heading">
-<h3 id="evidence-heading">Evidence</h3>
-<ul id="evidence-list">
-<li class="placeholder">No evidence yet. Supporting excerpts will be listed here.</li>
-</ul>
-<details id="details-placeholder">
-<summary>How facts are decided</summary>
-<p>Detailed reasoning and source references will appear here once the next step connects the API.</p>
-</details>
-</section>
-<div class="form-previews">
-<article aria-labelledby="volunteer-form-heading" id="preview-volunteer-application">
-<h3 id="volunteer-form-heading">Volunteer application — readable preview</h3>
-<dl>
-<div><dt>Name</dt><dd id="volunteer-name"><span class="unknown">Unknown</span></dd></div>
-<div><dt>Email</dt><dd id="volunteer-email"><span class="unknown">Unknown</span></dd></div>
-<div><dt>Availability</dt><dd id="volunteer-availability"><span class="unknown">Unknown</span></dd></div>
-<div><dt>Needs equipment</dt><dd id="volunteer-equipment"><span class="unknown">Unknown</span></dd></div>
-<div><dt>Motivation (optional)</dt><dd id="volunteer-motivation"><span class="unknown">Unknown</span></dd></div>
-</dl>
-</article>
-<article aria-labelledby="request-form-heading" id="preview-availability-request">
-<h3 id="request-form-heading">Availability and equipment request — readable preview</h3>
-<dl>
-<div><dt>Name</dt><dd id="request-name"><span class="unknown">Unknown</span></dd></div>
-<div><dt>Availability</dt><dd id="request-availability"><span class="unknown">Unknown</span></dd></div>
-<div><dt>Needs equipment</dt><dd id="request-equipment"><span class="unknown">Unknown</span></dd></div>
-</dl>
-<p class="shared-note">Availability here mirrors the volunteer application. A shared correction updates both.</p>
-</article>
-</div>
-<section aria-labelledby="export-heading">
-<h3 id="export-heading">Export and current documents</h3>
-<div class="button-row">
-<button type="button" id="export-button" disabled>Export packet summary</button>
-</div>
-<ul class="download-list">
-<li><a id="download-volunteer-document" href="#preview-volunteer-application" aria-disabled="true">Download current volunteer application (placeholder)</a></li>
-<li><a id="download-availability-document" href="#preview-availability-request" aria-disabled="true">Download current availability request (placeholder)</a></li>
-</ul>
-</section>
-</section>
-</div>
+  <div class="wrap desk-layout">
+    <section class="workbench conversation" aria-labelledby="conversation-heading">
+      <div class="section-heading">
+        <span class="section-index" aria-hidden="true">01</span>
+        <div><p class="stage-label">Describe</p><h2 id="conversation-heading">Start with what you know</h2></div>
+      </div>
+      <p class="intro-copy">Tell the help desk about the applicant. It will suggest draft facts from your words; you decide what belongs in the packet.</p>
+      <p class="privacy-note"><strong>Privacy:</strong> Case data stays on this computer. Text sent for analysis goes to Groq.</p>
+      <form id="message-form" aria-labelledby="conversation-heading">
+        <div class="field">
+          <label for="message-input">Describe the applicant</label>
+          <p class="hint" id="message-input-hint">Include availability, equipment, contact details, or motivation.</p>
+          <textarea id="message-input" name="message" rows="4" aria-describedby="message-input-hint" placeholder="Example: I am available weekday evenings and need a loan laptop."></textarea>
+        </div>
+        <button type="submit" id="message-submit" disabled>Send message</button>
+      </form>
+      <div id="status-message" role="status" aria-live="polite">Start a practice packet to begin.</div>
+      <p id="provider-notice" role="status" aria-live="polite" hidden>Provider is not ready. You can still correct facts manually and export the current draft.</p>
+      <div id="error-message" role="alert"></div>
+      <details class="pending-help" id="pending-help">
+        <summary>What to do if a message is still pending</summary>
+        <p>If a request reports “still pending,” keep its text and do not send it again. Resume the case to check its latest saved facts; it cannot confirm whether an earlier provider request is still in flight. Review the case, then use manual correction if needed.</p>
+      </details>
+      <section class="message-history" aria-labelledby="message-history-heading" id="message-history">
+        <h3 id="message-history-heading">Your notes</h3>
+        <ol id="message-list">
+          <li class="placeholder">No messages yet. Your conversation will appear here as a readable list.</li>
+        </ol>
+      </section>
+      <details class="resolve-section correction-disclosure" aria-labelledby="correction-heading" id="resolve-section">
+        <summary class="correction-summary"><span id="correction-heading">Correct a fact</span></summary>
+        <p id="correction-note">One corrected value can update both forms. The source is shown with the value so you can check what changed.</p>
+        <form id="correction-form" aria-describedby="correction-note">
+          <div class="field">
+            <label for="correction-field">Field to correct</label>
+            <select id="correction-field" name="field">
+              <option value="name">Name</option>
+              <option value="email">Email</option>
+              <option value="availability">Availability</option>
+              <option value="equipment">Equipment</option>
+              <option value="motivation">Motivation</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="correction-availability-input" id="correction-value-label">Corrected availability</label>
+            <input id="correction-availability-input" name="availability" type="text" autocomplete="off" placeholder="e.g. weekday evenings">
+          </div>
+          <div class="field" hidden>
+            <label for="correction-equipment-input">Corrected equipment</label>
+            <select id="correction-equipment-input" name="equipment" hidden>
+              <option value="">Choose an answer</option>
+              <option value="true">Needed</option>
+              <option value="false">Not needed</option>
+            </select>
+          </div>
+          <button type="submit" id="correction-availability-apply" disabled>Apply shared availability correction</button>
+        </form>
+      </details>
+    </section>
+
+    <section class="workbench packet" aria-labelledby="packet-heading">
+      <div class="section-heading packet-title">
+        <span class="section-index" aria-hidden="true">03</span>
+        <div><p class="stage-label">Review</p><h2 id="packet-heading">The practice packet</h2></div>
+        <span class="status-stamp" id="packet-status">Draft — not yet confirmed for practice</span>
+      </div>
+      <p class="packet-intro">Unknown or conflicting answers stay marked. Read the evidence before you confirm for practice.</p>
+      <div class="form-previews">
+        <article aria-labelledby="volunteer-form-heading" id="preview-volunteer-application" class="paper-form">
+          <p class="form-kicker">Form 1 <span>Volunteer services</span></p>
+          <h3 id="volunteer-form-heading">Volunteer application</h3>
+          <dl>
+            <div><dt>Name</dt><dd id="volunteer-name"><span class="unknown">Unknown</span></dd></div>
+            <div><dt>Email</dt><dd id="volunteer-email"><span class="unknown">Unknown</span></dd></div>
+            <div class="linked-field"><dt>Availability <span class="link-mark">Shared</span></dt><dd id="volunteer-availability"><span class="unknown">Unknown</span></dd></div>
+            <div><dt>Needs equipment</dt><dd id="volunteer-equipment"><span class="unknown">Unknown</span></dd></div>
+            <div><dt>Motivation <span class="optional">Optional</span></dt><dd id="volunteer-motivation"><span class="unknown">Unknown</span></dd></div>
+          </dl>
+        </article>
+        <article aria-labelledby="request-form-heading" id="preview-availability-request" class="paper-form">
+          <p class="form-kicker">Form 2 <span>Volunteer services</span></p>
+          <h3 id="request-form-heading">Availability and equipment request</h3>
+          <dl>
+            <div><dt>Name</dt><dd id="request-name"><span class="unknown">Unknown</span></dd></div>
+            <div class="linked-field"><dt>Availability <span class="link-mark">Shared</span></dt><dd id="request-availability"><span class="unknown">Unknown</span></dd></div>
+            <div><dt>Needs equipment</dt><dd id="request-equipment"><span class="unknown">Unknown</span></dd></div>
+          </dl>
+          <p class="shared-note">Availability is the same fact in both forms.</p>
+        </article>
+      </div>
+      <div class="shared-value-strip" id="shared-value-strip" aria-live="polite">
+        <span class="shared-value-label">Shared availability</span>
+        <strong id="shared-value">Unknown</strong>
+        <span class="shared-source" id="shared-source">One value appears on both forms above.</span>
+      </div>
+      <details class="evidence-disclosure" id="evidence-disclosure">
+        <summary>Sources, evidence, and open questions</summary>
+        <section class="evidence-section" aria-labelledby="evidence-heading">
+          <h3 id="evidence-heading">Evidence and open questions</h3>
+          <ul id="evidence-list">
+            <li class="placeholder">No evidence yet. Supporting excerpts will be listed here.</li>
+          </ul>
+          <details id="details-placeholder">
+            <summary>How facts are decided</summary>
+            <p>Detailed reasoning and source references will appear here once the next step connects the API.</p>
+          </details>
+        </section>
+      </details>
+      <section class="confirmation-section" aria-labelledby="confirmation-heading">
+        <div class="section-heading compact-heading">
+          <span class="section-index" aria-hidden="true">04</span>
+          <div><p class="stage-label">Review for practice</p><h3 id="confirmation-heading">Check the personal facts</h3></div>
+        </div>
+        <p id="confirmation-note">Status stays as draft until you confirm for practice. This is not a real applicant confirmation.</p>
+        <div class="check-row">
+          <input type="checkbox" id="facts-confirm-checkbox">
+          <label for="facts-confirm-checkbox">I have reviewed name, email, availability, equipment, and motivation. Unknown items are shown as unknown.</label>
+        </div>
+        <button type="button" id="facts-confirm-button" disabled>Confirm facts for practice</button>
+      </section>
+      <section class="export-section" aria-labelledby="export-heading">
+        <div class="section-heading compact-heading">
+          <span class="section-index" aria-hidden="true">05</span>
+          <div><p class="stage-label">Keep a copy</p><h3 id="export-heading">Export current documents</h3></div>
+        </div>
+        <p>Export creates the current packet summary and enables the two form downloads when available.</p>
+        <div class="button-row"><button type="button" id="export-button" disabled>Export packet summary</button></div>
+        <ul class="download-list">
+          <li><a id="download-volunteer-document" href="#preview-volunteer-application" aria-disabled="true">Download current volunteer application (placeholder)</a></li>
+          <li><a id="download-availability-document" href="#preview-availability-request" aria-disabled="true">Download current availability request (placeholder)</a></li>
+        </ul>
+      </section>
+    </section>
+  </div>
 </main>
 <footer class="site-footer">
-<div class="wrap">
-<p>PaperPath simulator: case data is stored by the locally running PaperPath server on this computer; text submitted for analysis is sent to Groq to suggest draft facts for review. Practice only. No Alexa+ service access, no arbitrary PDF support, no agency endorsement, no production acceptance.</p>
-</div>
+  <div class="wrap"><p>PaperPath practice simulator. No Alexa+ service access, arbitrary PDF support, agency endorsement, or production acceptance.</p></div>
 </footer>
 <script type="module" src="./main.ts"></script>
 </body>

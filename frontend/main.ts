@@ -22,9 +22,20 @@ function text(el: HTMLElement | null, s: string): void {
 }
 function setStatus(s: string): void {
   text($('status-message'), s);
+  const feedback = $('case-feedback');
+  if (feedback instanceof HTMLElement) {
+    const needsAttention = /failed|unavailable|needs attention/i.test(s);
+    feedback.hidden = document.body.dataset.caseActive !== 'false' || !needsAttention;
+    feedback.textContent = needsAttention ? s : '';
+  }
 }
 function setError(s: string): void {
   text($('error-message'), s);
+  const feedback = $('case-error-feedback');
+  if (feedback instanceof HTMLElement) {
+    feedback.hidden = document.body.dataset.caseActive !== 'false' || s === '';
+    feedback.textContent = s;
+  }
 }
 function loadStored(): string {
   try {
@@ -79,19 +90,6 @@ function isComplete(): boolean {
   if (validation) return validation.complete;
   return missingFields().length === 0 && conflictFields().length === 0;
 }
-function collectEvidence(): string[] {
-  const out: string[] = [];
-  if (!packet) return out;
-  for (const f of FIELDS) {
-    const fact = packet.facts[f];
-    if (!fact) continue;
-    if (fact.evidence && fact.evidence.quote.trim() !== '') out.push(fact.evidence.quote);
-    for (const c of fact.conflicts) {
-      if (c.evidence && c.evidence.quote.trim() !== '') out.push(c.evidence.quote);
-    }
-  }
-  return [...new Set(out)];
-}
 function questionFor(f: Field): string {
   if (f === 'equipment') return 'Do you need equipment for volunteering?';
   if (f === 'availability') return 'What is your availability?';
@@ -129,6 +127,25 @@ function setPreview(id: string, field: Field): void {
   }
   void miss;
 }
+function renderSharedAvailability(): void {
+  const value = $('shared-value');
+  const source = $('shared-source');
+  if (!value || !source) return;
+  const fact = packet?.facts.availability;
+  const conflicting = Boolean(fact && fact.conflicts.length > 0);
+  const raw = fact ? fact.value : null;
+  const shown = conflicting ? 'Unknown' : fmt('availability', raw);
+  value.textContent = shown;
+  if (conflicting) {
+    source.textContent = 'Conflicting answers; review the evidence below.';
+    return;
+  }
+  if (!fact || shown === 'Unknown') {
+    source.textContent = 'No supported availability yet.';
+    return;
+  }
+  source.textContent = 'This value appears on both forms.';
+}
 function clearDownloads(): void {
   lastExportId = '';
   const a1 = $('download-volunteer-document');
@@ -155,8 +172,10 @@ function onRevisionChanged(): void {
 function renderMessages(): void {
   const list = $('message-list');
   if (!list) return;
-  while (list.firstChild) list.removeChild(list.firstChild);
+  const history = $('message-history');
   const sources = packet ? packet.sources : [];
+  if (history) history.hidden = sources.length === 0;
+  while (list.firstChild) list.removeChild(list.firstChild);
   if (sources.length === 0) {
     const li = document.createElement('li');
     li.setAttribute('class', 'placeholder');
@@ -178,31 +197,74 @@ function renderEvidence(): void {
   const list = $('evidence-list');
   if (!list) return;
   while (list.firstChild) list.removeChild(list.firstChild);
-  const ev = collectEvidence();
   const miss = missingFields();
   const conf = conflictFields();
   const need: Field[] = [...new Set([...miss, ...conf])];
-  if (ev.length === 0 && need.length === 0 && conf.length === 0) {
-    const li = document.createElement('li');
-    li.setAttribute('class', 'placeholder');
-    li.textContent = 'No evidence yet. Supporting excerpts will be listed here.';
-    list.appendChild(li);
-  } else {
-    for (const q of ev) {
-      const li = document.createElement('li');
-      li.textContent = q;
-      list.appendChild(li);
+  const fieldNames: Record<Field, string> = {
+    name: 'Name', email: 'Email', availability: 'Availability',
+    equipment: 'Equipment', motivation: 'Motivation'
+  };
+  for (const field of FIELDS) {
+    const fact = packet?.facts[field];
+    const conflicting = Boolean(fact && fact.conflicts.length > 0);
+    const missing = miss.includes(field);
+    const currentValue = fact ? fmt(field, fact.value) : 'Unknown';
+    const status = conflicting
+      ? 'Unknown — conflicting answers'
+      : missing
+        ? 'Unknown — missing or incomplete'
+        : fact
+          ? currentValue
+          : 'Unknown — no supporting answer';
+    const variants = fact
+      ? [
+          { label: 'Recorded value', value: fact.value, evidence: fact.evidence },
+          ...fact.conflicts.map((variant, index) => ({
+            label: 'Conflicting answer ' + String(index + 1),
+            value: variant.value,
+            evidence: variant.evidence
+          }))
+        ]
+      : [];
+    const sourceLabels = variants.map(({ evidence }) => {
+      const index = packet?.sources.findIndex((item) => item.id === evidence.sourceId) ?? -1;
+      return index >= 0 ? 'Source ' + String(index + 1) : 'Source unavailable';
+    });
+    const sourcesSummary = sourceLabels.length === 0
+      ? 'No source'
+      : [...new Set(sourceLabels)].join(', ');
+    const item = document.createElement('li');
+    item.setAttribute('class', 'evidence-item');
+    const disclosure = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = fieldNames[field] + ' — ' + status + ' · ' + sourcesSummary;
+    disclosure.appendChild(summary);
+    if (variants.length === 0) {
+      const question = document.createElement('p');
+      question.textContent = 'Open question: ' + questionFor(field);
+      disclosure.appendChild(question);
+    } else {
+      const quotes = document.createElement('ul');
+      quotes.setAttribute('class', 'evidence-quotes');
+      for (const variant of variants) {
+        const sourceIndex = packet?.sources.findIndex((source) => source.id === variant.evidence.sourceId) ?? -1;
+        const sourceLabel = sourceIndex >= 0 ? 'Source ' + String(sourceIndex + 1) : 'Source unavailable';
+        const quote = document.createElement('li');
+        const label = document.createElement('strong');
+        label.textContent = variant.label + ' (' + fmt(field, variant.value) + ') · ' + sourceLabel + ': ';
+        quote.appendChild(label);
+        quote.appendChild(document.createTextNode('“' + variant.evidence.quote + '”'));
+        quotes.appendChild(quote);
+      }
+      disclosure.appendChild(quotes);
+      if (missing && !conflicting) {
+        const question = document.createElement('p');
+        question.textContent = 'Open question: ' + questionFor(field);
+        disclosure.appendChild(question);
+      }
     }
-    for (const f of conf) {
-      const li = document.createElement('li');
-      li.textContent = 'Conflict in ' + f + ': conflicting answers shown as Unknown.';
-      list.appendChild(li);
-    }
-    for (const f of need) {
-      const li = document.createElement('li');
-      li.textContent = 'Question: ' + questionFor(f);
-      list.appendChild(li);
-    }
+    item.appendChild(disclosure);
+    list.appendChild(item);
   }
   const det = $('details-placeholder');
   if (det instanceof HTMLDetailsElement) {
@@ -219,6 +281,7 @@ function renderEvidence(): void {
 function renderPacket(): void {
   renderMessages();
   renderEvidence();
+  renderSharedAvailability();
   setPreview('volunteer-name', 'name');
   setPreview('volunteer-email', 'email');
   setPreview('volunteer-availability', 'availability');
@@ -269,12 +332,24 @@ function applyPacket(res: PacketResponse, revisionChanged: boolean): void {
   packet = res.packet;
   validation = res.validation;
   caseId = packet.id;
+  document.body.dataset.caseActive = 'true';
   revision = packet.revision;
   saveStored(caseId);
   const inp = $('case-id-input');
   if (inp instanceof HTMLInputElement) inp.value = caseId;
   if (revisionChanged) onRevisionChanged();
   renderPacket();
+}
+function revealRecoveryHelp(): void {
+  const pending = $('pending-help');
+  const correction = $('resolve-section');
+  if (pending instanceof HTMLDetailsElement) pending.open = true;
+  if (correction instanceof HTMLDetailsElement) correction.open = true;
+}
+function isRecoveryError(e: unknown): boolean {
+  if (!(e instanceof ApiError)) return false;
+  const code = e.code.toLowerCase();
+  return e.code === 'MESSAGE_PENDING' || code.includes('provider') || code.includes('model') || code.includes('groq') || code.includes('upstream');
 }
 function friendly(e: unknown): string {
   if (e instanceof ApiError) {
@@ -342,6 +417,11 @@ function ensureCorrectionUI(): void {
     const f: Field = isField(raw) ? raw : 'availability';
     const label = form ? form.querySelector('label[for=correction-availability-input]') : null;
     if (label) label.textContent = f === 'availability' ? 'Corrected availability' : 'Corrected ' + f;
+    if (availInput) {
+      const current = factValue(f);
+      const hasCurrent = current !== null && !(typeof current === 'string' && current.trim() === '');
+      availInput.placeholder = hasCurrent ? 'Current: ' + fmt(f, current) : 'Enter corrected ' + f;
+    }
     const btn = $('correction-availability-apply');
     if (btn) btn.textContent = f === 'availability' ? 'Apply shared availability correction' : 'Apply ' + f + ' correction';
     const availWrap = availInput ? (availInput.closest('.field') ?? availInput.parentElement) : null;
@@ -369,7 +449,7 @@ async function doCreate(): Promise<void> {
   try {
     const res = await createCase();
     applyPacket(res, true);
-    setStatus('New case ' + caseId + ' started at revision ' + String(revision) + '.');
+    setStatus('Practice packet started.');
     const box = $('message-input');
     if (box instanceof HTMLTextAreaElement) box.focus();
   } catch (e) {
@@ -386,7 +466,7 @@ async function doResume(id: string): Promise<void> {
   try {
     const res = await getCase(id);
     applyPacket(res, true);
-    setStatus('Resumed case ' + caseId + ' at revision ' + String(revision) + '.');
+    setStatus('Saved case resumed.');
   } catch (e) {
     setError(friendly(e));
     setStatus('Resume failed. Check the case ID and retry.');
@@ -412,8 +492,9 @@ async function doSend(): Promise<void> {
       const changed = res.packet.revision !== revision;
       applyPacket(res, changed);
       if (input && input.value === t) input.value = '';
-      setStatus('Message saved at revision ' + String(revision) + '.');
+      setStatus('Message saved.');
     } catch (e) {
+    if (isRecoveryError(e)) revealRecoveryHelp();
       setStatus('Message request needs attention. Review the error for next steps.');
       if (e instanceof ApiError && e.code === 'STALE_REVISION') {
         try {
@@ -461,7 +542,7 @@ async function doCorrect(): Promise<void> {
       const res = await correctFact(caseId, revision, field, value);
       const changed = res.packet.revision !== revision;
       applyPacket(res, changed);
-      setStatus('Correction for ' + field + ' saved at revision ' + String(revision) + '.');
+      setStatus('Correction saved.');
     } catch (e) {
       setStatus('Correction request needs attention. Review the error for next steps.');
       if (e instanceof ApiError && e.code === 'STALE_REVISION') {
@@ -497,7 +578,7 @@ async function doConfirm(): Promise<void> {
       const res = await confirmFacts(caseId, revision);
       const changed = res.packet.revision !== revision;
       applyPacket(res, changed);
-      setStatus('Confirmed for practice at revision ' + String(revision) + '.');
+      setStatus('Confirmed for practice.');
     } catch (e) {
       setStatus('Confirmation request needs attention. Review the error for next steps.');
       if (e instanceof ApiError && e.code === 'STALE_REVISION') {
@@ -538,7 +619,7 @@ async function doExport(): Promise<void> {
           a2.setAttribute('aria-disabled', 'false');
           a2.textContent = 'Download current availability request (revision ' + String(revision) + ', ' + status + ')';
         }
-        setStatus('Exported revision ' + String(revision) + ' (' + status + '). Both downloads point to the current export.');
+        setStatus('Both forms are ready to download.');
       } else {
         clearDownloads();
         setStatus('Export is not current. Review the packet and retry export.');
@@ -570,6 +651,7 @@ async function init(): Promise<void> {
   }
   const providerNotice = $('provider-notice');
   if (providerNotice) providerNotice.hidden = providerReady;
+  if (!providerReady) revealRecoveryHelp();
   try {
     const listed = await listCases();
     void listed;
@@ -583,13 +665,15 @@ async function init(): Promise<void> {
     try {
       const res = await getCase(stored);
       applyPacket(res, true);
-      setStatus('Resumed case ' + caseId + ' at revision ' + String(revision) + '.');
+      setStatus('Saved case resumed.');
     } catch {
       setStatus('Saved case unavailable. Start a new case or resume another ID.');
+      document.body.dataset.caseActive = 'false';
       renderPacket();
     }
   } else {
-    setStatus(providerReady ? 'Session ready. Start a new case or resume an ID.' : 'Session ready without helper service. Start a case; manual correction stays available.');
+    document.body.dataset.caseActive = 'false';
+    setStatus('Ready to start a practice packet.');
     renderPacket();
   }
   const createBtn = $('case-create-button');
@@ -623,6 +707,27 @@ async function init(): Promise<void> {
   const expBtn = $('export-button');
   if (expBtn) expBtn.addEventListener('click', () => {
     void doExport();
+  });
+  document.querySelectorAll<HTMLAnchorElement>('a[href^="#"]').forEach((anchor) => {
+    anchor.addEventListener('click', (event) => {
+      const targetId = anchor.getAttribute('href')?.slice(1);
+      const target = targetId ? $(targetId) : null;
+      if (!(target instanceof HTMLElement)) return;
+      const disclosures: HTMLDetailsElement[] = [];
+      let parent = target.parentElement;
+      while (parent) {
+        if (parent instanceof HTMLDetailsElement) disclosures.push(parent);
+        parent = parent.parentElement;
+      }
+      if (disclosures.length === 0) return;
+      event.preventDefault();
+      disclosures.forEach((disclosure) => { disclosure.open = true; });
+      if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+      requestAnimationFrame(() => {
+        target.focus({ preventScroll: true });
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
   });
   updateButtons();
 }
