@@ -40,13 +40,14 @@ test('message requests preserve owner-scoped replay and pending behavior over HT
   assert.equal(result.schema, 'paperpath-message-single-flight-test-v1');
   assert.equal(result.result, 'PASS');
   assert.equal(result.providerEndpointGuarded, true);
-  assert.equal(result.providerCalls, 10);
+  assert.equal(result.providerCalls, 14);
   assert.equal(result.firstWaveCalls, 2);
   assert.equal(result.ownerIsolation, true);
   assert.equal(result.identicalDedup, true);
   assert.equal(result.changedPayload409, true);
   assert.equal(result.committedReplayNoProviderCall, true);
   assert.equal(result.unknownFailureRemainsPendingWithoutRetry, true);
+  assert.equal(result.providerFailureMatrixPreservesPendingStateWithoutRetry, true);
   assert.equal(result.completionMcpFailureLeavesReservationPendingWithoutRetry, true);
   assert.equal(result.unsupportedCompletionReturnsClarificationWithoutMutationOrRetry, true);
   assert.equal(result.productionDomainUnsupportedFactReturnsSanitizedClarificationWithoutMutationOrRetry, true);

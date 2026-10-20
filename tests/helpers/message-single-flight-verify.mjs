@@ -18,6 +18,7 @@ const timeoutMs = 8000;
 const held = [];
 let providerCalls = 0;
 let failNext = false;
+let nextProviderMode;
 let holdNextProviderResponse = false;
 let unsupportedFactNext = false;
 let conflictingFactNext = false;
@@ -161,7 +162,7 @@ function cleanup() {
   }
   return cleanupTask;
 }
-async function api(method, route, session, payload) {
+async function api(method, route, session, payload, requestTimeoutMs = timeoutMs) {
   const url = new URL(route, base);
   if (url.origin !== base || url.hostname !== '127.0.0.1') throw new Error('api-origin-rejected');
   const headers = { Accept: 'application/json', Origin: base };
@@ -172,7 +173,7 @@ async function api(method, route, session, payload) {
   }
   const response = await fetch(url, {
     method, headers, body: payload === undefined ? undefined : JSON.stringify(payload),
-    signal: AbortSignal.timeout(timeoutMs), redirect: 'manual'
+    signal: AbortSignal.timeout(requestTimeoutMs), redirect: 'manual'
   });
   const raw = await response.text();
   let json;
@@ -618,6 +619,20 @@ try {
         return;
       }
       if (failNext) { failNext = false; finishProvider(res, 400); return; }
+      const providerMode = nextProviderMode;
+      nextProviderMode = undefined;
+      if (providerMode === '429') { finishProvider(res, 429); return; }
+      if (providerMode === '5xx') { finishProvider(res, 503); return; }
+      if (providerMode === 'malformed') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{malformed');
+        return;
+      }
+      if (providerMode === 'timeout') {
+        req.setTimeout(20000, () => res.destroy(new Error('mock-request-timeout')));
+        held.push(res);
+        return;
+      }
       if (holdNextProviderResponse) { holdNextProviderResponse = false; held.push(res); return; }
       if (providerCalls <= 2) { held.push(res); return; }
       if (unsupportedFactNext) { unsupportedFactNext = false; finishProvider(res, 200, true); return; }
@@ -784,6 +799,53 @@ globalThis.fetch=async(input,init={})=>{
   assert.equal(retry.json.error, 'MESSAGE_PENDING');
   assert.equal(providerCalls, beforeFailure + 1, 'unknown provider outcome stays pending without another call');
 
+  const ownerAId = ownerA.cookie.slice('paperpath_session='.length);
+  const mainDb = new DatabaseSync(path.join(dataDir, 'paperpath.sqlite'));
+  const mainMessageSnapshot = (key, caseId = caseA.id, ownerId = ownerAId) => ({
+    operation: mainDb.prepare('SELECT * FROM operations WHERE owner=? AND key=?').all(ownerId, key),
+    reservation: mainDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerId, key),
+    packet: mainDb.prepare('SELECT revision,body FROM cases WHERE id=?').get(caseId),
+    exports: mainDb.prepare('SELECT * FROM exports WHERE case_id=? ORDER BY id').all(caseId)
+  });
+  async function verifyProviderFailureMode(mode, timeout = timeoutMs) {
+    const body = {
+      expectedRevision: proofA.packet.revision,
+      idempotencyKey: `msg_${randomUUID()}`,
+      text: `Morgan Bell follow-up provider failure ${mode}.`
+    };
+    const beforeState = mainMessageSnapshot(body.idempotencyKey);
+    const beforeCalls = providerCalls;
+    nextProviderMode = mode;
+    const requestStartedAt = Date.now();
+    const failedResponse = await api('POST', messagePathA, ownerA, body, timeout);
+    const elapsedMs = Date.now() - requestStartedAt;
+    assert.equal(failedResponse.status, 409, `${mode} outcome remains pending`);
+    assert.equal(failedResponse.json.error, 'MESSAGE_PENDING', `${mode} outcome is reported as pending`);
+    if (mode === 'timeout') assert.ok(elapsedMs >= 14500, `production provider timeout elapsed for ${elapsedMs}ms`);
+    assert.equal(providerCalls, beforeCalls + 1, `${mode} issues exactly one provider request`);
+    const pendingState = mainMessageSnapshot(body.idempotencyKey);
+    assert.equal(pendingState.operation.length, 0, `${mode} writes no operation`);
+    assert.equal(pendingState.reservation.length, 1, `${mode} keeps its reservation pending`);
+    const attemptToken = pendingState.reservation[0]?.attempt_token;
+    assert.match(attemptToken, /^[a-f0-9]{32}$/, `${mode} retains its acquired attempt token`);
+    assert.deepEqual(pendingState.packet, beforeState.packet, `${mode} preserves case facts and revision`);
+    assert.deepEqual(pendingState.exports, beforeState.exports, `${mode} preserves export state`);
+    const replay = await api('POST', messagePathA, ownerA, body);
+    assert.equal(replay.status, 409, `${mode} same-key replay remains pending`);
+    assert.equal(replay.json.error, 'MESSAGE_PENDING');
+    assert.equal(providerCalls, beforeCalls + 1, `${mode} same-key replay does not call provider again`);
+    const replayState = mainMessageSnapshot(body.idempotencyKey);
+    assert.equal(replayState.reservation[0]?.attempt_token, attemptToken,
+      `${mode} same-key replay preserves the acquired attempt token`);
+    assert.deepEqual(replayState, pendingState,
+      `${mode} same-key replay preserves the pending reservation and case/export state`);
+  }
+  await verifyProviderFailureMode('429');
+  await verifyProviderFailureMode('5xx');
+  await verifyProviderFailureMode('malformed');
+  await verifyProviderFailureMode('timeout', 20000);
+  releaseHeld();
+
   const completionFailureText = 'Morgan Bell asked us to confirm the north gate schedule.';
   const completionFailureBody = {
     expectedRevision: proofA.packet.revision,
@@ -798,13 +860,6 @@ globalThis.fetch=async(input,init={})=>{
     'one successful extraction precedes the injected MCP dispatch failure');
   assert.equal(await readFile(path.join(dataDir, 'completion-dispatch-failure.injected'), 'utf8'), 'injected');
 
-  const ownerAId = ownerA.cookie.slice('paperpath_session='.length);
-  const mainDb = new DatabaseSync(path.join(dataDir, 'paperpath.sqlite'));
-  const mainMessageSnapshot = (key, caseId = caseA.id, ownerId = ownerAId) => ({
-    operation: mainDb.prepare('SELECT * FROM operations WHERE owner=? AND key=?').all(ownerId, key),
-    reservation: mainDb.prepare('SELECT * FROM message_reservations WHERE owner=? AND key=?').all(ownerId, key),
-    packet: mainDb.prepare('SELECT revision,body FROM cases WHERE id=?').get(caseId)
-  });
   const unsupportedBody = {
     expectedRevision: proofA.packet.revision,
     idempotencyKey: unsupportedCompletionKey,
@@ -1067,9 +1122,10 @@ globalThis.fetch=async(input,init={})=>{
   const adapterResult = await verifyAdapterCompletion();
   const result = {
     schema: 'paperpath-message-single-flight-test-v1', result: 'PASS',
-    providerEndpointGuarded: true, providerCalls: 10,
+    providerEndpointGuarded: true, providerCalls: 14,
     firstWaveCalls: 2, ownerIsolation: true, identicalDedup: true, changedPayload409: true,
     committedReplayNoProviderCall: true, unknownFailureRemainsPendingWithoutRetry: true,
+    providerFailureMatrixPreservesPendingStateWithoutRetry: true,
     completionMcpFailureLeavesReservationPendingWithoutRetry: true,
     unsupportedCompletionReturnsClarificationWithoutMutationOrRetry: true,
     productionDomainUnsupportedFactReturnsSanitizedClarificationWithoutMutationOrRetry: true,
