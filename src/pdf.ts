@@ -10,7 +10,9 @@ import type { Case, Field, Store } from './domain.ts';
 export const formNames = ['application', 'availability-equipment'] as const;
 const value = (packet: Case, field: Field) => String(packet.facts[field]?.value ?? 'Unknown');
 
-export async function prepareExport(store: Store, owner: string, packet: Case, directory: string, idempotencyKey: string) {
+export async function prepareExport(store: Store, owner: string, packet: Case, directory: string, idempotencyKey: string,
+  writeManifest: (path: string, contents: string) => Promise<void> = (path, contents) =>
+    writeFile(path, contents, { mode: 0o600 })) {
   if (!validatePacket(packet).complete) throw new DomainError('INCOMPLETE_PACKET');
   const cached = store.cachedExport(owner,packet.id,packet.revision,idempotencyKey);
   if (cached) return cached;
@@ -55,7 +57,6 @@ export async function prepareExport(store: Store, owner: string, packet: Case, d
   const manifest = {id,caseId:packet.id,revision:packet.revision,generatedAt,status,
     templateVersion:'1',mappingVersion:'1',sourceHashes:packet.sources.map(source=>source.sha256),
     validation:validatePacket(packet),artifacts};
-  const saved = store.saveExport(owner,packet.id,packet.revision,id,manifest,idempotencyKey);
-  await writeFile(join(directory,id,'manifest.json'),JSON.stringify(manifest,null,2),{mode:0o600});
-  return saved;
+  await writeManifest(join(directory,id,'manifest.json'),JSON.stringify(manifest,null,2));
+  return store.saveExport(owner,packet.id,packet.revision,id,manifest,idempotencyKey);
 }
