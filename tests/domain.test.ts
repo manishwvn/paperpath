@@ -274,6 +274,44 @@ test('an uncertain equipment statement does not support a negative proposal', as
   });
 });
 
+test('clipped, conditional, uncertain, and contradictory equipment evidence cannot decide a boolean', async () => {
+  const ambiguous = [
+    { source: 'If I need equipment, I will ask.', quote: 'I need equipment' },
+    { source: 'I think I need equipment.', quote: 'I need equipment' },
+    { source: 'I need equipment, but I do not need any equipment.', quote: 'I need equipment' },
+  ];
+
+  for (const { source, quote } of ambiguous) {
+    await withStore((store, owner, caseId) => {
+      const before = store.get(owner, caseId);
+      for (const value of [true, false]) {
+        expectDomainError(() => store.propose(owner, caseId, before.revision, idempotencyKey(), source, [
+          { field: 'equipment', value, quote },
+        ]), 'UNSUPPORTED_FACT');
+        assert.deepEqual(store.get(owner, caseId), before);
+      }
+    });
+  }
+
+  for (const { source, quote } of [
+    { source: 'I do not need equipment.', quote: 'need equipment' },
+    { source: 'I never need equipment.', quote: 'need equipment' },
+  ]) {
+    await withStore((store, owner, caseId) => {
+      const before = store.get(owner, caseId);
+      expectDomainError(() => store.propose(owner, caseId, before.revision, idempotencyKey(), source, [
+        { field: 'equipment', value: true, quote },
+      ]), 'UNSUPPORTED_FACT');
+      assert.deepEqual(store.get(owner, caseId), before);
+
+      const packet = store.propose(owner, caseId, before.revision, idempotencyKey(), source, [
+        { field: 'equipment', value: false, quote },
+      ]);
+      assert.equal(packet.facts.equipment?.value, false);
+    });
+  }
+});
+
 test('equipment ownership and contradictory requests cannot prove no equipment is needed', async () => {
   for (const quote of ["I don't have equipment.", 'I do not own equipment, so I need equipment.',
     'I do not need equipment, but I need equipment.']) {

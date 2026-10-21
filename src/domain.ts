@@ -59,14 +59,22 @@ function evidenceFor(source: Source, candidate: Candidate): Evidence {
   if (typeof candidate.value === 'string') {
     if (!candidate.quote.includes(candidate.value)) throw new DomainError('UNSUPPORTED_FACT');
   } else {
-    const quote = candidate.quote.trim().toLowerCase().replaceAll('\u2019',"'");
-    if (!/\bequipment\b/.test(quote) || /\b(might|maybe|perhaps|probably|could|unsure|uncertain|think|hope)\b|not sure|whether/.test(quote)) {
+    const quoteEnd = start + candidate.quote.length;
+    const sentenceStart = Math.max(...['.', '!', '?', '\n'].map(boundary => source.text.lastIndexOf(boundary, start - 1))) + 1;
+    const sentenceEnds = ['.', '!', '?', '\n']
+      .map(boundary => source.text.indexOf(boundary, quoteEnd))
+      .filter(index => index >= 0);
+    const sentenceEnd = sentenceEnds.length ? Math.min(...sentenceEnds) : source.text.length;
+    const contextEnd = sentenceEnd < source.text.length && source.text[sentenceEnd] === '?' ? sentenceEnd + 1 : sentenceEnd;
+    const sentence = source.text.slice(sentenceStart, contextEnd);
+    const context = sentence.toLowerCase().replaceAll('\u2019', "'");
+    if (!/\bequipment\b/.test(context) || /\b(might|maybe|perhaps|probably|could|unsure|uncertain|think|hope|if|unless|whether)\b|not sure/.test(context)) {
       throw new DomainError('UNSUPPORTED_FACT');
     }
-    const noNeed = /\b(?:(?:do not|don't|dont|no longer)\s+(?:need|require|want)\s+(?:(?:any|some|the)\s+)?equipment|(?:need|require|want)\s+no\s+equipment|no\s+equipment\s+(?:is\s+)?(?:needed|required|requested)|equipment\s+(?:is\s+)?not\s+(?:needed|required|requested))\b/g;
-    const negative = noNeed.test(quote);
-    noNeed.lastIndex = 0;
-    const affirmativeText = quote.replace(noNeed,' ');
+    if (sentence.includes('?')) throw new DomainError('UNSUPPORTED_FACT');
+    const noNeed = /\b(?:(?:do not|don't|dont|never|no longer)\s+(?:need|require|want)\s+(?:(?:any|some|the)\s+)?equipment|(?:need|require|want)\s+no\s+equipment|no\s+equipment\s+(?:is\s+)?(?:needed|required|requested)|equipment\s+(?:is\s+)?not\s+(?:needed|required|requested))\b/;
+    const negative = noNeed.test(context);
+    const affirmativeText = context.replace(noNeed, ' ');
     const positive = /\b(?:need|require|want)\s+(?:(?:any|some|the)\s+)?equipment\b|\bequipment\s+(?:is\s+)?(?:needed|required|requested)\b/.test(affirmativeText);
     if (negative && positive || candidate.value && !positive || !candidate.value && !negative) {
       throw new DomainError('UNSUPPORTED_FACT');
