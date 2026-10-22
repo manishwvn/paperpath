@@ -1,60 +1,64 @@
 # PaperPath
 
-PaperPath is a practice simulator that helps a fictional community volunteer applicant keep a volunteer application and an availability and equipment request consistent. It uses an MCP client and server over Streamable HTTP. It is not connected to Amazon's gated Alexa+ service, does not accept arbitrary PDFs, and does not submit applications to an organization.
+### Tell us once. Get two forms that agree.
 
-The application is in active development. The [public demo video](https://youtu.be/KOGpO7Dg23g) shows a provider result rejected by the unsupported-fact guard, followed by a manual synthetic correction, confirmation, and two PDF exports. No successful current live extraction is claimed. PaperPath is an Alexa+ simulator, not an Alexa+ integration. Original code and demonstration templates are MIT licensed.
+PaperPath is a local practice simulator for preparing a fictional volunteer application and matching availability-and-equipment request. Review the facts, correct a shared value once, confirm the packet for practice, and download two PDFs. It does not submit anything to an organization.
 
-## Check out the review candidate
+PaperPath simulates an Alexa+ conversation using a local MCP client and server over Streamable HTTP (protocol version 2025-11-25). It is not connected to Alexa+ or Amazon, has no Amazon endorsement, and is not an official application service.
 
-The default `main` branch is an older backend-only revision and does not contain this frontend walkthrough. The [PR #17 candidate](https://github.com/manishwvn/paperpath/pull/17), on `codex/core03-ui-clarification-proof` and based on PR #16, is under review. Its application source is `5b2205cf6e6ecd6693f453bfc101b24d800e2e63`. Commit `5560b843683cd7f1603d00240fb761c9611207a9` and [checks run 39347547108](https://github.com/manishwvn/paperpath/actions/runs/39347547108) are a historical test baseline; they do not include the later provider-failure matrix or this documentation revision. See the PR's current Checks tab for validation of the latest revision. This candidate is not a release or submission-readiness claim.
+## Review candidate
 
-From a directory where `paperpath-review` does not already exist:
+This walkthrough targets the review branch **codex/review-ready-20261022**. The application source used for the current checks is **5d60eed**; the documentation update may advance the branch without changing that app source. In a fresh clone, use the review branch shown for this candidate, not an older default-branch checkout. Check the latest pull-request checks before relying on past results.
 
-```sh
-git clone --no-checkout https://github.com/manishwvn/paperpath.git paperpath-review
-cd paperpath-review
-git fetch origin refs/pull/17/head
-git checkout --detach 5b2205cf6e6ecd6693f453bfc101b24d800e2e63
-git rev-parse HEAD
-```
-
-The last command must print `5b2205cf6e6ecd6693f453bfc101b24d800e2e63`. This pins the application source used by the current review candidate. The PR head also contains tests and documentation; use its Checks tab for the latest exact-head results because that head can advance.
+The app source at **5d60eed** passed a clean dependency install, 59 tests, typecheck, lint, and build. The current review candidate also completed a synthetic HTTP-to-MCP journey that corrected a shared value, confirmed the packet, downloaded two matching PDFs, and rejected the old download links after a later correction. This test used synthetic facts and did not call Groq. These checks do not establish production readiness.
 
 ## Run locally
 
-After the pinned checkout above, use Node 24.6.0. From the `paperpath-review` directory, install the locked dependencies, build the frontend, and start the server:
+Requirements: Node.js 24.6.0. From a fresh checkout of the review branch:
 
-```sh
-npm ci --ignore-scripts
+~~~sh
+git clone https://github.com/manishwvn/paperpath.git
+cd paperpath
+git fetch origin
+git switch --track origin/codex/review-ready-20261022
+node --version
+npm ci
 npm run build
 env -u GROQ_API_KEY npm run dev
-```
+~~~
 
-The default server is available at `http://127.0.0.1:4317` and `http://localhost:4317`. Local case data and runtime artifacts use ignored `.local/`; never commit credentials, case data, or runtime artifacts.
+The server listens on <http://127.0.0.1:4317> by default. Open that address in your browser. The final command starts PaperPath with inference disabled, so this walkthrough makes no provider request. If your shell does not support **env -u**, unset **GROQ_API_KEY** before starting the server.
 
-## Optional public-origin allowlist
+By default, local case data and generated exports are stored under the ignored **.local/** directory. Do not use real applicant details.
 
-`PAPERPATH_PUBLIC_ORIGINS` accepts a JSON array of exact, canonical HTTPS origins. For example, when an external TLS reverse proxy is configured:
+## Use the practice desk
 
-```sh
-PAPERPATH_PUBLIC_ORIGINS='["https://paperpath.example.org"]' npm run dev
-```
+Choose **System**, **Light**, or **Dark** from the Appearance control. System follows your operating-system setting.
 
-Leave it unset (or set it to `[]`) for the loopback-only HTTP defaults. Invalid or noncanonical values fail startup before runtime files are created. Public origins must not reuse the reserved `localhost` or `127.0.0.1` authority on the server port.
+1. Select **Start practice packet**.
+2. Open **Correct a fact** and enter fictional values for Name, Email, Availability, and Equipment. Motivation is optional.
+3. Review the two form previews. Change Availability once and check that both forms show the same value. Unknown or conflicting facts remain visible for review.
+4. Check the review box and select **Confirm facts for practice**. This is a practice confirmation, not an application submission.
+5. Select **Prepare downloads**, then download the application PDF and availability-request PDF.
 
-This setting is an allowlist, not a TLS server or deployment. The app continues listening on loopback; a separately configured TLS reverse proxy must forward traffic to that listener. The app checks the exact Host authority and Origin pairing, keeps browser CSRF checks, ignores forwarded authority headers, and sets `Secure` on session cookies for configured public origins. Public HTTPS operation and eligible hosting have not been proven. Event guidance permits local evaluation with a public repository and demo video, so an always-on host is optional. Point-in-time video metadata does not establish continued playback or maintained judge access.
+For a longer step-by-step walkthrough with sample values and recovery notes, see the [local evaluator guide](docs/evaluation.md).
 
-## Verify
+## Privacy and limits
 
-```sh
+- Case data and exports stay in the local runtime directory. If you enable Groq inference, text you send for analysis is sent to Groq. Provider retention has not been verified. The evaluator path above disables inference.
+- If a message is reported as pending, keep its text and do not send it again. Resume shows the latest saved case, but cannot determine whether an earlier provider request is still in flight. Review the saved facts and use manual correction when needed.
+- Exports are tied to a packet revision. A later correction invalidates the previous download links; prepare a new export after reviewing and reconfirming the updated packet. A PDF already downloaded to your device cannot be recalled.
+- The current candidate is a local review build. It has not been deployed or submitted; an eligible host, Alexa/Amazon certification, and event eligibility are not established.
+
+The [public 65-second video](https://youtu.be/KOGpO7Dg23g) is an older edited walkthrough from a separate fictional case. Its provider suggestion was rejected by the unsupported-fact guard; the video then shows manual recovery, practice confirmation, and two PDF exports. It does not show the current review UI or prove successful live extraction.
+
+## Run the checks
+
+~~~sh
 npm test
 npm run typecheck
 npm run lint
 npm run build
-```
+~~~
 
-The app can still be used for manual fact corrections and PDF exports when the optional inference provider is unavailable. Text sent for provider analysis leaves the local app; do not enter real applicant data in this practice simulator. See [`docs/contracts.md`](docs/contracts.md) for the application contract and verification limits.
-
-Current-source native Chrome proof covers CORE-03 clarification behavior using deterministic synthetic fixtures restricted to the exact loopback app and MCP origins. That browser proof does not establish successful live provider extraction. A separate historical one-call inference attempt was rejected by the unsupported-fact guard. Full keyboard and screen-reader verification, maintained judge access, eligibility, and final submission preflight remain open.
-
-For a key-free, synthetic walkthrough from case creation through confirmation and both PDF downloads, follow the [local evaluator guide](docs/evaluation.md).
+See [application contracts](docs/contracts.md) for the source-evidence rules and protocol details. No successful current live-provider extraction is claimed.

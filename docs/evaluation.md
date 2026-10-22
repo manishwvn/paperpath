@@ -1,63 +1,73 @@
-# Local evaluator walkthrough
+# PaperPath: local evaluator guide
 
-PaperPath is a practice simulator, not Amazon Alexa+, and it does not submit an application. Use fictional values only. This walkthrough needs no Groq key or public host. The server stores its local runtime data under the ignored `.local/` directory.
+PaperPath is a practice simulator for a fictional volunteer packet. It creates a volunteer application and matching availability-and-equipment request. It does not submit a real application and is not connected to Alexa+, Amazon, or an agency.
 
-The [public demo video](https://youtu.be/KOGpO7Dg23g) shows a provider result rejected by the unsupported-fact guard, then manual synthetic correction, confirmation, and two PDF exports. No successful current live extraction is claimed.
+This guide targets review branch **codex/review-ready-20261022**. The checked application source is **5d60eed**; the guide may be committed as a documentation-only update after that app source. Check the current pull-request branch and checks before evaluating. Do not use an old default-branch checkout for this candidate.
 
-## Check out the review candidate
+The [public 65-second video](https://youtu.be/KOGpO7Dg23g) is from an older UI and a separate synthetic case. It shows a provider suggestion rejected by the unsupported-fact guard, followed by manual correction, practice confirmation, and two PDFs. It does not show this candidate’s System/Light/Dark control or a successful live AI extraction.
 
-The default `main` branch is an older backend-only revision and does not contain this frontend journey. The [PR #17 candidate](https://github.com/manishwvn/paperpath/pull/17), on `codex/core03-ui-clarification-proof` and based on PR #16, is under review. Its application source is `5b2205cf6e6ecd6693f453bfc101b24d800e2e63`. Commit `5560b843683cd7f1603d00240fb761c9611207a9` and [checks run 39347547108](https://github.com/manishwvn/paperpath/actions/runs/39347547108) are a historical test baseline; they do not include later provider-failure tests or this documentation revision. See the PR's current Checks tab for validation of the latest revision. This is a local review candidate, not a submission-ready release.
+## Start the key-free app
 
-From a directory where `paperpath-review` does not already exist:
+Use Node.js 24.6.0. In a fresh clone of the review branch:
 
-```sh
-git clone --no-checkout https://github.com/manishwvn/paperpath.git paperpath-review
-cd paperpath-review
-git fetch origin refs/pull/17/head
-git checkout --detach 5b2205cf6e6ecd6693f453bfc101b24d800e2e63
-git rev-parse HEAD
-```
-
-The last command must print `5b2205cf6e6ecd6693f453bfc101b24d800e2e63`. This pins the application source used by the current review candidate. The PR head also contains tests and documentation; use its Checks tab for the latest exact-head results because that head can advance.
-
-## Start the app without inference
-
-After the pinned checkout above, use Node 24.6.0. In the `paperpath-review` directory:
-
-```sh
-npm ci --ignore-scripts
+~~~sh
+git clone https://github.com/manishwvn/paperpath.git
+cd paperpath
+git fetch origin
+git switch --track origin/codex/review-ready-20261022
+node --version
+npm ci
 npm run build
 env -u GROQ_API_KEY npm run dev
-```
+~~~
 
-Open <http://127.0.0.1:4317>. Keep the server terminal open while using the app. This key-free path uses the manual correction controls and sends no message for provider analysis.
+Open <http://127.0.0.1:4317> and leave the server running while you use the app. The key-free command makes no Groq request. By default, case data and exports are written under the ignored **.local/** directory. Use fictional values only.
 
-## Create and correct a synthetic case
+If your shell does not support **env -u**, remove **GROQ_API_KEY** from that shell’s environment before running **npm run dev**.
 
-The published video is an edited screenshot sequence from a separate fictional case. Its current revision-12 PDFs show “Weekday evenings, 6–8 p.m.” and “Equipment requested: No.” The optional walkthrough below uses different fictional inputs, including Wednesdays; do not treat those walkthrough values as the contents of the public video or its PDFs.
+## Review one packet manually
 
-1. Select **Start new case**.
-2. In **Correct a fact**, choose each field and apply these fictional values:
+1. In **Appearance**, choose **System**, **Light**, or **Dark**. System follows the operating-system appearance; Light and Dark set an explicit choice.
+2. Select **Start practice packet**.
+3. Expand **Correct a fact**. Use the field menu and **Save correction** control to enter these synthetic values:
 
-   | Field | Value |
+   | Field | Practice value |
    |---|---|
    | Name | Nora Grey |
    | Email | nora@example.test |
    | Availability | Thursdays |
    | Equipment | Needed |
-   | Motivation | I want to help the community. |
+   | Motivation (optional) | I want to help the community. |
 
-3. Change **Availability** to `Wednesdays` and apply the shared availability correction. Confirm the packet review shows `Wednesdays` in both the volunteer application and the availability/equipment request previews.
-4. Check the review confirmation box and select **Confirm facts for practice**. The status should change from draft to confirmed for practice.
-5. Select **Export packet summary**. The two download links should become available for the current confirmed revision.
-6. Download both PDFs and open them. Check that each contains Nora Grey, `Wednesdays`, and the equipment answer; the application and request should have their respective titles. The PDF status is `Applicant-confirmed`.
+   Name, Email, Availability, and Equipment are required before the packet can be confirmed. Motivation is optional.
+4. Change Availability to **Wednesdays**. Check that the shared availability value and both form previews now say **Wednesdays**.
+5. Review the packet and any evidence or open questions. Unknown or conflicting values stay visible; correct them before confirmation.
+6. Check **I have reviewed…** and select **Confirm facts for practice**. The status should indicate practice confirmation. This does not submit or send the packet.
+7. Select **Prepare downloads**, then download both the application and availability request PDFs. Check that each has Nora Grey, Wednesdays, the equipment answer, and its own form title.
 
-Stop the local server with Ctrl+C when finished. Do not use real applicant information or treat these PDFs as a submitted application.
+If you change a fact after preparing exports, the old download links are rejected because they refer to an earlier revision. Review and reconfirm the current packet, then prepare new downloads. A PDF already saved on your device cannot be recalled.
 
-## Verification and limits
+## What this walkthrough proves
 
-The synthetic integration test in [`tests/journey.test.ts`](../tests/journey.test.ts) exercises the local HTTP and MCP path, applies a corrected shared value, confirms the packet, generates both PDFs, downloads them, and checks their structure and extracted text without a provider call. PR #16 adds a schema-valid unsupported candidate through the production route, local MCP, and domain validator, checking the sanitized response and unchanged pending case. PR #17 adds production-route tests for a Store conflict, blocked confirmation/export, and mocked provider 429, 503, malformed-output, and elapsed-timeout outcomes. Those failure cases use deterministic loopback mocks and assert retained pending state/token with no retry; they are not evidence from a real provider outage.
+The current application source passed a clean dependency install, all 59 tests, typecheck, lint, and build. The synthetic HTTP-to-MCP journey in **tests/journey.test.ts** creates a case, applies a corrected shared value, confirms the packet, downloads both revision-bound PDFs, and checks that a later correction makes those old download links stale. It uses synthetic values and does not call Groq.
 
-Current-source native Chrome proof covers CORE-03 clarification behavior using deterministic synthetic fixtures restricted to the exact loopback app and MCP origins. This proves fixture-driven browser behavior; it does not prove successful live provider extraction. A separate historical one-call live inference attempt was rejected by the unsupported-fact guard. The manual walkthrough above lets an evaluator inspect the shared correction, confirmation, and PDF downloads without credentials; it does not reproduce the fixture-driven clarification scenarios.
+The app’s browser talks to the local HTTP server. For packet operations, that server uses its local Streamable HTTP MCP client/server endpoint and domain validation before storing the case and creating PDFs. Groq is optional. The command in this guide disables it, and all edits above use manual correction.
 
-Full keyboard and screen-reader verification remains open. Public HTTPS operation and eligible hosting are unproven; an always-on host is optional under event guidance when the repository runs locally and a demo video is provided. Public video metadata was checked at a point in time and does not guarantee continued playback or maintained judge access. Eligibility and final submission preflight remain open.
+## Privacy and recovery boundaries
+
+Do not enter real applicant data. Case data stays in the local runtime directory, which is **.local/** by default. If you configure Groq and send a narrative for analysis, that text is sent to Groq; retention behavior has not been verified. This guide makes no provider call.
+
+If the app reports that a message may still be pending, keep the original text and do not send it again. Resume retrieves the latest saved case but cannot establish whether an earlier provider request is still running. Review the current facts and continue with manual correction if needed.
+
+The public video is an older, separate case; it is not a recording of this candidate. This local review does not establish an always-on service, production readiness, Alexa/Amazon certification, event eligibility, or approval to publish or submit. Final release and submission remain subject to human review and explicit approval.
+
+## Checks
+
+~~~sh
+npm test
+npm run typecheck
+npm run lint
+npm run build
+~~~
+
+For the rules that keep source quotes, corrections, confirmation, and exports connected, see [the application contracts](contracts.md).
