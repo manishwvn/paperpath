@@ -3,7 +3,9 @@ import type { Case, Validation, Field, Value, PendingMessage } from '../src/doma
 import type { PacketResponse } from './api.ts';
 
 const STORE_KEY = 'paperpath.caseId';
+const THEME_STORE_KEY = 'paperpath.theme';
 const FIELDS: Field[] = ['name', 'email', 'availability', 'equipment', 'motivation'];
+type ThemePreference = 'system' | 'light' | 'dark';
 
 let caseId = '';
 let revision = 0;
@@ -17,6 +19,31 @@ let lastExportId = '';
 
 function $(id: string): HTMLElement | null {
   return document.getElementById(id);
+}
+function readThemePreference(): ThemePreference {
+  try {
+    const value = localStorage.getItem(THEME_STORE_KEY);
+    return value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+  } catch {
+    return 'system';
+  }
+}
+function initTheme(): void {
+  const preference = readThemePreference();
+  document.documentElement.dataset.theme = preference;
+  const control = $('theme-select');
+  if (!(control instanceof HTMLSelectElement)) return;
+  control.value = preference;
+  control.addEventListener('change', () => {
+    const value = control.value;
+    if (value !== 'system' && value !== 'light' && value !== 'dark') return;
+    document.documentElement.dataset.theme = value;
+    try {
+      localStorage.setItem(THEME_STORE_KEY, value);
+    } catch {
+      // Keep the chosen theme for this page when storage is unavailable.
+    }
+  });
 }
 function text(el: HTMLElement | null, s: string): void {
   if (el) el.textContent = s;
@@ -153,13 +180,13 @@ function clearDownloads(): void {
   if (a1 instanceof HTMLAnchorElement) {
     a1.setAttribute('href', '#preview-volunteer-application');
     a1.setAttribute('aria-disabled', 'true');
-    a1.textContent = 'Download current volunteer application (placeholder)';
+    a1.textContent = 'Download application (prepare export first)';
   }
   const a2 = $('download-availability-document');
   if (a2 instanceof HTMLAnchorElement) {
     a2.setAttribute('href', '#preview-availability-request');
     a2.setAttribute('aria-disabled', 'true');
-    a2.textContent = 'Download current availability request (placeholder)';
+    a2.textContent = 'Download availability request (prepare export first)';
   }
 }
 function uncheckConfirm(): void {
@@ -321,8 +348,17 @@ function updateButtons(): void {
   const done = isComplete();
   const box = $('facts-confirm-checkbox');
   const checked = box instanceof HTMLInputElement ? box.checked : false;
+  const caseHeading = $('case-controls-heading');
+  if (caseHeading) caseHeading.textContent = hasCase ? 'Practice packet options' : 'Start your practice packet';
+  const caseHelp = $('case-controls-help');
+  if (caseHelp) caseHelp.textContent = hasCase
+    ? 'Start another packet or continue a saved case.'
+    : 'Share the details you know. You can review and correct facts before export.';
   const createBtn = $('case-create-button');
-  if (createBtn instanceof HTMLButtonElement) createBtn.disabled = busy;
+  if (createBtn instanceof HTMLButtonElement) {
+    createBtn.disabled = busy;
+    createBtn.textContent = hasCase ? 'Start another packet' : 'Start practice packet';
+  }
   const msgBtn = $('message-submit');
   if (msgBtn instanceof HTMLButtonElement) msgBtn.disabled = busy || !hasCase;
   const corBtn = $('correction-availability-apply');
@@ -453,7 +489,7 @@ function ensureCorrectionUI(): void {
       availInput.placeholder = hasCurrent ? 'Current: ' + fmt(f, current) : 'Enter corrected ' + f;
     }
     const btn = $('correction-availability-apply');
-    if (btn) btn.textContent = f === 'availability' ? 'Apply shared availability correction' : 'Apply ' + f + ' correction';
+    if (btn) btn.textContent = f === 'availability' ? 'Save availability' : 'Save correction';
     const availWrap = availInput ? (availInput.closest('.field') ?? availInput.parentElement) : null;
     const eqWrap = eq ? (eq.closest('.field') ?? eq.parentElement) : null;
     if (availInput) availInput.hidden = f === 'equipment';
@@ -652,16 +688,17 @@ async function doExport(): Promise<void> {
         if (a1 instanceof HTMLAnchorElement) {
           a1.setAttribute('href', getDownloadUrl(caseId, lastExportId, 'application'));
           a1.setAttribute('aria-disabled', 'false');
-          a1.textContent = 'Download current volunteer application (revision ' + String(revision) + ', ' + status + ')';
+          a1.textContent = 'Download application PDF';
         }
         const a2 = $('download-availability-document');
         if (a2 instanceof HTMLAnchorElement) {
           a2.setAttribute('href', getDownloadUrl(caseId, lastExportId, 'availability-equipment'));
           a2.setAttribute('aria-disabled', 'false');
-          a2.textContent = 'Download current availability request (revision ' + String(revision) + ', ' + status + ')';
+          a2.textContent = 'Download availability request PDF';
         }
         const notice = pendingNotice();
-        setStatus(notice ? 'Both forms are ready to download. ' + notice : 'Both forms are ready to download.');
+        const ready = 'Both forms are ready to download for revision ' + String(revision) + ' (' + status + ').';
+        setStatus(notice ? ready + ' ' + notice : ready);
       } else {
         clearDownloads();
         setStatus('Export is not current. Review the packet and retry export.');
@@ -682,6 +719,7 @@ async function doExport(): Promise<void> {
   });
 }
 async function init(): Promise<void> {
+  initTheme();
   ensureCorrectionUI();
   setError('');
   setStatus('Loading session...');

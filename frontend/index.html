@@ -1,50 +1,61 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="system">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="PaperPath practice help desk simulator with conversation and readable packet review.">
+<meta name="color-scheme" content="dark light">
 <title>PaperPath — Community Help Desk Simulator</title>
+<script src="./theme-init.js"></script>
 <link rel="stylesheet" href="./styles.css">
 </head>
 <body data-case-active="false">
 <a class="skip-link" href="#main">Skip to main content</a>
 <header class="site-header">
   <div class="wrap masthead">
-    <div class="brandline"><span class="brand-mark" aria-hidden="true">P</span><span>PaperPath <span class="brand-divider">/</span> Practice desk</span></div>
-    <p class="eyebrow">Openly labelled Alexa+ simulator for practice</p>
+    <div class="masthead-top">
+      <div class="brandline"><span>PaperPath</span><span class="brand-divider">Practice desk</span></div>
+      <label class="theme-control" for="theme-select"><span>Appearance</span>
+        <select id="theme-select" name="theme">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
+    </div>
+    <p class="eyebrow">Community volunteer practice</p>
     <h1 id="site-title">Tell us once. Get two forms that agree.</h1>
-    <p class="lede">Build a practice packet from one conversation, then review both forms before export.</p>
+    <p class="lede">Build an application and a matching availability request from one conversation.</p>
     <details class="simulator-note">
       <summary>About this practice simulator</summary>
       <p>This simulator does not connect to Alexa+, accept arbitrary PDFs, carry agency endorsement, or submit a production application.</p>
     </details>
-    <details class="workflow">
-      <summary>How the packet comes together</summary>
-      <nav aria-label="Practice packet steps">
-        <ol>
-          <li><a href="#message-form"><span class="step-number">1</span><span><strong>Describe</strong><small>Share the details</small></span></a></li>
-          <li><a href="#correction-form"><span class="step-number">2</span><span><strong>Resolve</strong><small>Correct gaps</small></span></a></li>
-          <li><a href="#confirmation-heading"><span class="step-number">3</span><span><strong>Review</strong><small>Check both forms</small></span></a></li>
-          <li><a href="#export-heading"><span class="step-number">4</span><span><strong>Download</strong><small>Keep current copies</small></span></a></li>
-        </ol>
-      </nav>
-    </details>
+    <nav class="workflow" aria-label="Practice packet steps">
+      <ol>
+        <li><a href="#message-form"><span class="step-number">1</span><span><strong>Describe</strong><small>Share what you know</small></span></a></li>
+        <li><a href="#correction-heading"><span class="step-number">2</span><span><strong>Resolve</strong><small>Correct missing or conflicting facts</small></span></a></li>
+        <li><a href="#confirmation-heading"><span class="step-number">3</span><span><strong>Review</strong><small>Confirm and download</small></span></a></li>
+      </ol>
+    </nav>
     <section class="case-controls" aria-labelledby="case-controls-heading">
-      <h2 id="case-controls-heading">Practice case</h2>
-      <p id="case-controls-help">Start a packet or resume one with a case ID you already have.</p>
+      <div class="case-intro">
+        <p class="case-eyebrow">Ready to begin?</p>
+        <h2 id="case-controls-heading">Start your practice packet</h2>
+        <p id="case-controls-help">Share the details you know. You can review and correct facts before export.</p>
+      </div>
       <div id="case-feedback" role="status" aria-live="polite" hidden></div>
       <div id="case-error-feedback" role="alert" hidden></div>
       <button type="button" id="case-create-button" class="start-case-button">Start practice packet</button>
       <details class="resume-disclosure">
-        <summary>Resume a saved case</summary>
+        <summary>Continue a saved case</summary>
         <p class="resume-safety">If a message reports that it may still be pending, keep its text and do not send it again. Resume checks the latest saved case; it cannot determine whether an earlier provider request is still in flight. Review the case, then use manual correction if needed.</p>
         <div class="case-row">
           <div class="field">
-            <label for="case-id-input">Case ID to resume</label>
-            <input id="case-id-input" name="caseId" type="text" autocomplete="off" placeholder="Paste a saved case ID" aria-describedby="case-controls-help">
+            <label for="case-id-input">Case ID</label>
+            <p class="hint" id="resume-case-help">Enter the ID from a saved case to continue.</p>
+            <input id="case-id-input" name="caseId" type="text" autocomplete="off" placeholder="Paste saved case ID" aria-describedby="resume-case-help">
           </div>
-          <button type="button" id="case-resume-button" disabled>Resume case</button>
+          <button type="button" id="case-resume-button" disabled>Resume saved case</button>
         </div>
       </details>
     </section>
@@ -81,7 +92,7 @@
         </ol>
       </section>
       <details class="resolve-section correction-disclosure" aria-labelledby="correction-heading" id="resolve-section">
-        <summary class="correction-summary"><span id="correction-heading">Correct a fact</span></summary>
+        <summary class="correction-summary"><span class="section-index" aria-hidden="true">02</span><span class="stage-label">Resolve</span><span id="correction-heading">Correct a fact</span></summary>
         <p id="correction-note">One corrected value can update both forms. The source is shown with the value so you can check what changed.</p>
         <form id="correction-form" aria-describedby="correction-note">
           <div class="field">
@@ -106,7 +117,7 @@
               <option value="false">Not needed</option>
             </select>
           </div>
-          <button type="submit" id="correction-availability-apply" disabled>Apply shared availability correction</button>
+          <button type="submit" id="correction-availability-apply" disabled>Save availability</button>
         </form>
       </details>
     </section>
@@ -161,7 +172,6 @@
       </details>
       <section class="confirmation-section" aria-labelledby="confirmation-heading">
         <div class="section-heading compact-heading">
-          <span class="section-index" aria-hidden="true">04</span>
           <div><p class="stage-label">Review for practice</p><h3 id="confirmation-heading">Check the personal facts</h3></div>
         </div>
         <p id="confirmation-note">Status stays as draft until you confirm for practice. This is not a real applicant confirmation.</p>
@@ -173,21 +183,20 @@
       </section>
       <section class="export-section" aria-labelledby="export-heading">
         <div class="section-heading compact-heading">
-          <span class="section-index" aria-hidden="true">05</span>
           <div><p class="stage-label">Keep a copy</p><h3 id="export-heading">Export current documents</h3></div>
         </div>
-        <p>Export creates the current packet summary and enables the two form downloads when available.</p>
-        <div class="button-row"><button type="button" id="export-button" disabled>Export packet summary</button></div>
+        <p>Prepare the current packet summary to enable both downloads.</p>
+        <div class="button-row"><button type="button" id="export-button" disabled>Prepare downloads</button></div>
         <ul class="download-list">
-          <li><a id="download-volunteer-document" href="#preview-volunteer-application" aria-disabled="true">Download current volunteer application (placeholder)</a></li>
-          <li><a id="download-availability-document" href="#preview-availability-request" aria-disabled="true">Download current availability request (placeholder)</a></li>
+          <li><a id="download-volunteer-document" href="#preview-volunteer-application" aria-disabled="true">Download application (prepare export first)</a></li>
+          <li><a id="download-availability-document" href="#preview-availability-request" aria-disabled="true">Download availability request (prepare export first)</a></li>
         </ul>
       </section>
     </section>
   </div>
 </main>
 <footer class="site-footer">
-  <div class="wrap"><p>PaperPath practice simulator. No Alexa+ service access, arbitrary PDF support, agency endorsement, or production acceptance.</p></div>
+  <div class="wrap"><p>Practice simulator only. No Alexa+ connection or real application submission.</p></div>
 </footer>
 <script type="module" src="./main.ts"></script>
 </body>
