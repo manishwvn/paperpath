@@ -438,6 +438,40 @@ async function verifyAdapterCompletion() {
     assert.equal(snapshot().reservations[0]?.attempt_token, tokenBeforeRestart,
       'restart and same-request replay leave the original server token unchanged');
 
+    const pendingGet = await adapterApi('GET', '/api/cases/' + packet.id, ownerA);
+    assert.equal(pendingGet.status, 200);
+    assert.equal(pendingGet.json.pendingMessages.length, 1);
+    const pendingSummary = pendingGet.json.pendingMessages[0];
+    assert.deepEqual(Object.keys(pendingSummary).sort(), ['createdAt', 'expectedRevision', 'state', 'text']);
+    assert.equal(pendingSummary.expectedRevision, packet.revision);
+    assert.equal(pendingSummary.text, sourceText);
+    assert.equal(pendingSummary.state, 'pending');
+    assert.ok(Number.isFinite(Date.parse(pendingSummary.createdAt)));
+    assert.equal(JSON.stringify(pendingGet.json).includes(attemptToken), false,
+      'owner GET returns no attempt token');
+
+    const hiddenGet = await adapterApi('GET', '/api/cases/' + packet.id, ownerB);
+    assert.equal(hiddenGet.status, 404, 'another owner cannot read the case or its pending message');
+    assert.equal(hiddenGet.json.error, 'CASE_NOT_FOUND');
+    assert.equal(JSON.stringify(hiddenGet).includes(sourceText), false, 'cross-owner response omits pending text');
+    assert.equal(JSON.stringify(hiddenGet).includes(attemptToken), false, 'cross-owner response omits attempt token');
+
+    const reservationsBeforeDuplicate = snapshotDb.prepare(
+      'SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token FROM message_reservations WHERE owner=? AND case_id=? ORDER BY key'
+    ).all(ownerAId, packet.id);
+    const duplicateKey = 'msg_' + randomUUID();
+    const duplicateHttp = await adapterApi('POST', '/api/cases/' + packet.id + '/message', ownerA, {
+      expectedRevision: packet.revision, idempotencyKey: duplicateKey, text: sourceText
+    });
+    assert.equal(duplicateHttp.status, 409);
+    assert.equal(duplicateHttp.json.error, 'MESSAGE_DUPLICATE_CONFLICT');
+    assert.equal(JSON.stringify(duplicateHttp).includes(attemptToken), false, 'duplicate conflict omits attempt token');
+    assert.deepEqual(snapshotDb.prepare(
+      'SELECT owner,key,case_id,expected_revision,source_text,fingerprint,attempt_token FROM message_reservations WHERE owner=? AND case_id=? ORDER BY key'
+    ).all(ownerAId, packet.id), reservationsBeforeDuplicate,
+    'a changed client key adds no second reservation');
+    assert.equal(providerCalls, priorProviderCalls, 'duplicate rejection makes no provider call');
+
     const noKeyMessageKey = 'msg_' + randomUUID();
     const noKeyMessageText = 'Morgan Bell prefers Saturday shifts.';
     const notStarted = await adapterApi('POST', '/api/cases/' + packet.id + '/message', ownerA, {
@@ -575,6 +609,35 @@ async function verifyAdapterCompletion() {
       'completed HTTP replay returns the corrected current case');
     assert.equal(providerCalls, beforeReplayProviderCalls, 'completed replay adds no provider call');
 
+    const manualText = 'Morgan Bell remains available after the service restart.';
+    seedStore = new Store(dbPath);
+    const manualReservationKey = 'msg_' + randomUUID();
+    const manualReservation = seedStore.reserveMessage(ownerAId, packet.id, corrected.json.packet.revision,
+      manualReservationKey, manualText);
+    assert.equal(manualReservation.state, 'pending');
+    assert.equal(manualReservation.acquired, true);
+    const manualAttemptToken = manualReservation.attemptToken;
+    seedStore.close();
+    seedStore = null;
+
+    const correctionWhilePending = await adapterApi('POST', '/api/cases/' + packet.id + '/correct', ownerA, {
+      expectedRevision: corrected.json.packet.revision, idempotencyKey: 'fix_' + randomUUID(),
+      field: 'name', value: 'Morgan Bell Corrected Again'
+    });
+    assert.equal(correctionWhilePending.status, 200, 'manual correction remains usable with pending text');
+    assert.equal(correctionWhilePending.json.pendingMessages.length, 1);
+    assert.equal(correctionWhilePending.json.pendingMessages[0].text, manualText);
+    const staleCompletion = await completeCall(ownerA, {
+      caseId: packet.id, expectedRevision: corrected.json.packet.revision,
+      idempotencyKey: manualReservationKey, sourceText: manualText, attemptToken: manualAttemptToken,
+      candidates: candidateList
+    });
+    assert.equal(staleCompletion.isError, true, 'manual revision prevents stale pending completion');
+    assert.equal(JSON.stringify(staleCompletion).includes(manualAttemptToken), false,
+      'stale completion result omits attempt token');
+    assert.equal(snapshotDb.prepare('SELECT COUNT(*) AS count FROM message_reservations WHERE owner=? AND key=?')
+      .get(ownerAId, manualReservationKey)?.count, 1, 'stale completion leaves the pending reservation intact');
+
     const eventLog = await readFile(path.join(adapterDataDir, 'mcp-events.jsonl'), 'utf8');
     assert.ok(eventLog.length > 0, 'existing metadata event log was exercised');
     assert.equal(eventLog.includes(attemptToken), false, 'metadata logs omit attempt token');
@@ -587,7 +650,11 @@ async function verifyAdapterCompletion() {
       proposeFactsSchemaRetained: true, tokenAbsentFromResultsAndLogs: true,
       correctedHttpReplayWithoutProvider: true, providerCredentialAbsent: true,
       pendingHttpReservationIsNotReinferred: true, knownNotStartedReservationIsReleased: true,
-      restartPendingReservationKeepsAttemptToken: true
+      restartPendingReservationKeepsAttemptToken: true,
+      restartGetReturnsOwnerScopedPendingSummaryWithoutToken: true,
+      crossOwnerPendingGet404WithoutDisclosure: true,
+      changedClientKeyDuplicateRejectedWithoutProviderCall: true,
+      manualCorrectionAllowedWhilePendingAndStaleCompletionRejected: true
     };
   } finally {
     const cleanupComplete = await cleanupAdapter();
@@ -863,7 +930,7 @@ globalThis.fetch=async(input,init={})=>{
   const unsupportedBody = {
     expectedRevision: proofA.packet.revision,
     idempotencyKey: unsupportedCompletionKey,
-    text: 'Morgan Bell asked us to confirm the north gate schedule.'
+    text: 'Morgan Bell requested a weekday afternoon orientation.'
   };
   const beforeUnsupported = providerCalls;
   const unsupported = await api('POST', messagePathA, ownerA, unsupportedBody);
@@ -883,7 +950,7 @@ globalThis.fetch=async(input,init={})=>{
   const unsupportedEvidenceBody = {
     expectedRevision: proofA.packet.revision,
     idempotencyKey: unsupportedEvidenceCompletionKey,
-    text: 'Morgan Bell asked us to confirm the north gate schedule.'
+    text: 'Morgan Bell requested a weekend welcome packet.'
   };
   const beforeUnsupportedEvidence = providerCalls;
   const unsupportedEvidence = await api('POST', messagePathA, ownerA, unsupportedEvidenceBody);
@@ -903,7 +970,7 @@ globalThis.fetch=async(input,init={})=>{
   const domainUnsupportedBody = {
     expectedRevision: proofA.packet.revision,
     idempotencyKey: domainUnsupportedCompletionKey,
-    text: 'Morgan Bell asked us to confirm the north gate schedule.'
+    text: 'Morgan Bell requested a weekday evening orientation.'
   };
   const beforeDomainUnsupported = providerCalls;
   const domainUnsupportedPacketBefore = mainDb.prepare('SELECT revision,body FROM cases WHERE id=?').get(caseA.id);

@@ -163,19 +163,19 @@ app.use('/api',(req,res,next)=>{
 app.get('/health',(_req,res)=>res.json({ok:true,application:'PaperPath',protocol:'2025-11-25'}));
 app.get('/api/session',(_req,res)=>res.json({csrf:csrf(res.locals.owner),providerReady:!!process.env.GROQ_API_KEY,model}));
 app.get('/api/cases',(_req,res)=>res.json({cases:store.list(res.locals.owner)}));
-const state = (packet:Case)=>({packet,validation:validatePacket(packet)});
+const state = (packet:Case,owner:string)=>({packet,validation:validatePacket(packet),pendingMessages:store.pendingMessages(owner,packet.id)});
 app.post('/api/cases',async(req,res)=>{
   const args = z.object({idempotencyKey:z.string().min(8).max(100)}).strict().parse(req.body);
   const packet = await withMcp(res.locals.owner,async client=>{
     const created = await call<Case>(client,'create_case',args);
     return call<Case>(client,'get_case',{caseId:created.id});
   });
-  res.json(state(packet));
+  res.json(state(packet,res.locals.owner));
 });
 app.get('/api/cases/:caseId',async(req,res)=>{
   const caseId = uuid.parse(req.params.caseId);
   const packet = await withMcp(res.locals.owner,client=>call<Case>(client,'get_case',{caseId}));
-  res.json(state(packet));
+  res.json(state(packet,res.locals.owner));
 });
 // Process-local in-flight dedup only; does not survive restart.
 const messageInflight = new Map<string, { fingerprint: string; promise: Promise<Case> }>();
@@ -188,12 +188,13 @@ app.post('/api/cases/:caseId/message',async(req,res)=>{
   if (inflightHit) {
     if (inflightHit.fingerprint!==fingerprint) throw new DomainError('IDEMPOTENCY_CONFLICT');
     const packet = await inflightHit.promise;
-    res.json(state(packet));
+    res.json(state(packet,res.locals.owner));
     return;
   }
   const task = (async()=>{
     const reservation = store.reserveMessage(res.locals.owner,caseId,args.expectedRevision,args.idempotencyKey,args.text);
     if (reservation.state==='completed') return reservation.packet;
+    if (reservation.state==='duplicate') throw new DomainError('MESSAGE_DUPLICATE_CONFLICT');
     if (!reservation.acquired) throw new DomainError('MESSAGE_PENDING');
 
     let extractionAttempted = false;
@@ -229,7 +230,7 @@ app.post('/api/cases/:caseId/message',async(req,res)=>{
   messageInflight.set(inflightKey,{fingerprint,promise:task});
   try {
     const packet = await task;
-    res.json(state(packet));
+    res.json(state(packet,res.locals.owner));
   } finally {
     if (messageInflight.get(inflightKey)?.promise===task) messageInflight.delete(inflightKey);
   }
@@ -241,7 +242,7 @@ app.post('/api/cases/:caseId/correct',async(req,res)=>{
     await call<Case>(client,'correct_fact',{caseId,...args});
     return call<Case>(client,'get_case',{caseId});
   });
-  res.json(state(packet));
+  res.json(state(packet,res.locals.owner));
 });
 app.post('/api/cases/:caseId/confirm',async(req,res)=>{
   const caseId = uuid.parse(req.params.caseId);
@@ -254,7 +255,7 @@ app.post('/api/cases/:caseId/confirm',async(req,res)=>{
         caseId,expectedRevision:args.expectedRevision,idempotencyKey:args.idempotencyKey});
       return call<Case>(client,'get_case',{caseId});
     },approval);
-    res.json(state(packet));
+    res.json(state(packet,res.locals.owner));
   } finally {approvals.delete(approval);}
 });
 app.post('/api/cases/:caseId/export',async(req,res)=>{
@@ -262,7 +263,7 @@ app.post('/api/cases/:caseId/export',async(req,res)=>{
   const args = mutation.strict().parse(req.body);
   const exported = await withMcp(res.locals.owner,client=>call<Record<string,unknown>>(client,'prepare_export',{caseId,...args}));
   const packet = await withMcp(res.locals.owner,client=>call<Case>(client,'get_case',{caseId}));
-  res.json({...state(packet),export:exported});
+  res.json({...state(packet,res.locals.owner),export:exported});
 });
 app.get('/api/cases/:caseId/exports/:exportId/:form',async(req,res)=>{
   const caseId = uuid.parse(req.params.caseId), exportId = uuid.parse(req.params.exportId);

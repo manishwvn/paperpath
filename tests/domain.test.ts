@@ -253,6 +253,42 @@ test('an explicit equipment negation supports a false proposal', async () => {
   });
 });
 
+test('equipment proposals check every source claim and preserve a quote-ending sentence boundary', async () => {
+  await withStore((store, owner, caseId) => {
+    const contradictory = 'I need equipment. I do not need equipment.';
+    const before = store.get(owner, caseId);
+    for (const value of [true, false]) {
+      expectDomainError(() => store.propose(owner, caseId, before.revision, idempotencyKey(), contradictory, [
+        { field: 'equipment', value, quote: 'I need equipment' },
+      ]), 'UNSUPPORTED_FACT');
+      assert.deepEqual(store.get(owner, caseId), before);
+    }
+
+    const negative = store.propose(owner, caseId, before.revision, idempotencyKey(),
+      'I do not need equipment. I hope to volunteer.', [
+        { field: 'equipment', value: false, quote: 'I do not need equipment.' },
+      ]);
+    assert.equal(negative.facts.equipment?.value, false);
+
+    const positive = store.propose(owner, caseId, negative.revision, idempotencyKey(),
+      'I need equipment. I hope to volunteer.', [
+        { field: 'equipment', value: true, quote: 'I need equipment.' },
+      ]);
+    assert.equal(positive.facts.equipment?.value, false);
+    assert.deepEqual(positive.facts.equipment?.conflicts.map(item => item.value), [true]);
+  });
+});
+
+test('repeated evidence quotes cannot hide conflicting equipment claims elsewhere in the source', async () => {
+  await withStore((store, owner, caseId) => {
+    const source = 'I need equipment. I do not need equipment. I need equipment.';
+    expectDomainError(() => store.propose(owner, caseId, 1, idempotencyKey(), source, [
+      { field: 'equipment', value: true, quote: 'I need equipment' },
+    ]), 'UNSUPPORTED_FACT');
+    assert.equal(store.get(owner, caseId).revision, 1);
+  });
+});
+
 test('an uncertain equipment statement does not support a positive proposal', async () => {
   await withStore((store, owner, caseId) => {
     const uncertain = 'I am not sure whether I need equipment.';

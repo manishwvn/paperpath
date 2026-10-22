@@ -1,5 +1,5 @@
 import { initSession, listCases, getCase, createCase, sendMessage, correctFact, confirmFacts, exportPacket, getDownloadUrl, ApiError } from './api.ts';
-import type { Case, Validation, Field, Value } from '../src/domain.ts';
+import type { Case, Validation, Field, Value, PendingMessage } from '../src/domain.ts';
 import type { PacketResponse } from './api.ts';
 
 const STORE_KEY = 'paperpath.caseId';
@@ -9,6 +9,7 @@ let caseId = '';
 let revision = 0;
 let packet: Case | null = null;
 let validation: Validation | null = null;
+let pendingMessages: PendingMessage[] = [];
 let providerReady = true;
 let busy = false;
 let tail: Promise<unknown> = Promise.resolve();
@@ -174,9 +175,9 @@ function renderMessages(): void {
   if (!list) return;
   const history = $('message-history');
   const sources = packet ? packet.sources : [];
-  if (history) history.hidden = sources.length === 0;
+  if (history) history.hidden = sources.length === 0 && pendingMessages.length === 0;
   while (list.firstChild) list.removeChild(list.firstChild);
-  if (sources.length === 0) {
+  if (sources.length === 0 && pendingMessages.length === 0) {
     const li = document.createElement('li');
     li.setAttribute('class', 'placeholder');
     li.textContent = 'No messages yet. Your conversation will appear here as a readable list.';
@@ -192,6 +193,26 @@ function renderMessages(): void {
     li.appendChild(document.createTextNode(s.text));
     list.appendChild(li);
   }
+  for (const pending of pendingMessages) {
+    const li = document.createElement('li');
+    const b = document.createElement('strong');
+    b.textContent = 'Unresolved message attempt (revision ' + String(pending.expectedRevision) + '): ';
+    li.appendChild(b);
+    li.appendChild(document.createTextNode('Saved ' + pending.createdAt + '. It was not resent. Review or edit this text before continuing: '));
+    li.appendChild(document.createTextNode(pending.text));
+    list.appendChild(li);
+  }
+}
+function pendingNotice(): string {
+  const count = pendingMessages.length;
+  if (count === 0) return '';
+  return String(count) + ' unresolved message ' + (count === 1 ? 'attempt is' : 'attempts are') +
+    ' saved with this case and were not resent. Review the original text in message history; when the editor was empty, it has also been copied there for manual continuation.';
+}
+function resumedStatus(): string {
+  const status = 'Saved case resumed.';
+  const notice = pendingNotice();
+  return notice ? status + ' ' + notice + ' Manual corrections and export remain available.' : status;
 }
 function renderEvidence(): void {
   const list = $('evidence-list');
@@ -331,12 +352,18 @@ function setBusy(on: boolean): void {
 function applyPacket(res: PacketResponse, revisionChanged: boolean): void {
   packet = res.packet;
   validation = res.validation;
+  pendingMessages = res.pendingMessages ?? [];
   caseId = packet.id;
   document.body.dataset.caseActive = 'true';
   revision = packet.revision;
   saveStored(caseId);
   const inp = $('case-id-input');
   if (inp instanceof HTMLInputElement) inp.value = caseId;
+  const messageInput = $('message-input');
+  if (pendingMessages.length > 0 && messageInput instanceof HTMLTextAreaElement && messageInput.value === '') {
+    messageInput.value = pendingMessages[0]?.text ?? '';
+  }
+  if (pendingMessages.length > 0) revealRecoveryHelp();
   if (revisionChanged) onRevisionChanged();
   renderPacket();
 }
@@ -349,19 +376,22 @@ function revealRecoveryHelp(): void {
 function isRecoveryError(e: unknown): boolean {
   if (!(e instanceof ApiError)) return false;
   const code = e.code.toLowerCase();
-  return e.code === 'MESSAGE_PENDING' || code.includes('provider') || code.includes('model') || code.includes('groq') || code.includes('upstream');
+  return e.code === 'MESSAGE_PENDING' || e.code === 'MESSAGE_DUPLICATE_CONFLICT' ||
+    e.code === 'network_error' || e.code === 'invalid_response' ||
+    code.includes('provider') || code.includes('model') || code.includes('groq') || code.includes('upstream');
 }
 function friendly(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.code === 'network_error') return 'Network issue. Your text was kept. Please retry.';
+    if (e.code === 'network_error') return 'The connection was lost. Your text was kept; check the saved message history before trying again.';
     if (e.code === 'STALE_REVISION') return 'This case changed. Refreshed to the current revision. Please review before retrying.';
     if (e.code === 'MESSAGE_PENDING') return 'This message is still pending and may have completed. Your text is still here, and the case is saved. Select “Resume case” to check the latest state; do not resubmit this message.';
+    if (e.code === 'MESSAGE_DUPLICATE_CONFLICT') return 'This exact message was already attempted at this case revision. No new provider attempt was started. Edit the text or make a manual correction.';
     if (e.code === 'UNSUPPORTED_FACT') return 'That fact was not clearly supported by your message. Please restate the detail you want included.';
     if (e.code === 'UNSUPPORTED_EVIDENCE') return 'The supporting words could not be matched to your message. Please restate the detail exactly.';
-    if (e.code === 'invalid_response') return 'Response could not be read. Your text was kept. Please retry.';
+    if (e.code === 'invalid_response') return 'The response could not be read. Your text was kept; check the saved message history before trying again.';
     const low = e.code.toLowerCase();
-    if (low.includes('provider') || low.includes('model') || low.includes('groq') || low.includes('upstream')) return 'Helper service is unavailable. Your text was kept. You can still correct facts manually.';
-    return 'Request failed (' + e.code + '). Your text was kept. Please retry.';
+    if (low.includes('provider') || low.includes('model') || low.includes('groq') || low.includes('upstream')) return 'The helper service did not confirm a result. Review the saved message before trying again; manual correction remains available.';
+    return 'Request failed (' + e.code + '). Your text was kept; review the saved message history before trying again.';
   }
   return 'Something went wrong. Your text was kept. Please retry.';
 }
@@ -466,7 +496,7 @@ async function doResume(id: string): Promise<void> {
   try {
     const res = await getCase(id);
     applyPacket(res, true);
-    setStatus('Saved case resumed.');
+    setStatus(resumedStatus());
   } catch (e) {
     setError(friendly(e));
     setStatus('Resume failed. Check the case ID and retry.');
@@ -494,8 +524,6 @@ async function doSend(): Promise<void> {
       if (input && input.value === t) input.value = '';
       setStatus('Message saved.');
     } catch (e) {
-    if (isRecoveryError(e)) revealRecoveryHelp();
-      setStatus('Message request needs attention. Review the error for next steps.');
       if (e instanceof ApiError && e.code === 'STALE_REVISION') {
         try {
           await refreshCase();
@@ -503,7 +531,19 @@ async function doSend(): Promise<void> {
           // Intentionally ignore refresh errors: STALE_REVISION message already prompts review.
         }
         setError(friendly(e));
-      } else setError(friendly(e));
+      } else {
+        if (isRecoveryError(e)) {
+          revealRecoveryHelp();
+          try {
+            await refreshCase();
+          } catch {
+            // The original text remains in the editor if the saved case cannot be read.
+          }
+        }
+        const notice = pendingNotice();
+        setStatus(notice ? 'Message outcome needs attention. ' + notice : 'Message request needs attention. Review the error for next steps.');
+        setError(friendly(e));
+      }
     } finally {
       setBusy(false);
     }
@@ -542,7 +582,8 @@ async function doCorrect(): Promise<void> {
       const res = await correctFact(caseId, revision, field, value);
       const changed = res.packet.revision !== revision;
       applyPacket(res, changed);
-      setStatus('Correction saved.');
+      const notice = pendingNotice();
+      setStatus(notice ? 'Correction saved. ' + notice : 'Correction saved.');
     } catch (e) {
       setStatus('Correction request needs attention. Review the error for next steps.');
       if (e instanceof ApiError && e.code === 'STALE_REVISION') {
@@ -619,7 +660,8 @@ async function doExport(): Promise<void> {
           a2.setAttribute('aria-disabled', 'false');
           a2.textContent = 'Download current availability request (revision ' + String(revision) + ', ' + status + ')';
         }
-        setStatus('Both forms are ready to download.');
+        const notice = pendingNotice();
+        setStatus(notice ? 'Both forms are ready to download. ' + notice : 'Both forms are ready to download.');
       } else {
         clearDownloads();
         setStatus('Export is not current. Review the packet and retry export.');
@@ -665,7 +707,7 @@ async function init(): Promise<void> {
     try {
       const res = await getCase(stored);
       applyPacket(res, true);
-      setStatus('Saved case resumed.');
+      setStatus(resumedStatus());
     } catch {
       setStatus('Saved case unavailable. Start a new case or resume another ID.');
       document.body.dataset.caseActive = 'false';

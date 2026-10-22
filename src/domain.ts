@@ -23,8 +23,10 @@ export type Case = {
 export type Validation = { complete: boolean; missing: Field[]; conflicts: Field[] };
 export type ReserveAcquired = { state: 'pending'; acquired: true; attemptToken: string };
 export type ReservePending = { state: 'pending'; acquired: false };
+export type ReserveDuplicate = { state: 'duplicate' };
 export type ReserveCompleted = { state: 'completed'; packet: Case };
-export type ReserveResult = ReserveAcquired | ReservePending | ReserveCompleted;
+export type ReserveResult = ReserveAcquired | ReservePending | ReserveDuplicate | ReserveCompleted;
+export type PendingMessage = { expectedRevision: number; text: string; createdAt: string; state: 'pending' };
 
 export class DomainError extends Error {
   code: string;
@@ -52,6 +54,48 @@ function validateValue(field: Field, value: Value): void {
   }
 }
 
+function sentenceSpans(text: string): Array<{ start: number; end: number; text: string }> {
+  const spans: Array<{ start: number; end: number; text: string }> = [];
+  let start = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (!/[.!?\n]/.test(text[index] ?? '')) continue;
+    const end = index + 1;
+    spans.push({ start, end, text: text.slice(start, end) });
+    start = end;
+  }
+  if (start < text.length) spans.push({ start, end: text.length, text: text.slice(start) });
+  return spans;
+}
+
+function equipmentClaim(sentence: string): boolean | undefined {
+  const context = sentence.toLowerCase().replaceAll('\u2019', "'");
+  if (!/\bequipment\b/.test(context)) return undefined;
+  if (/\b(might|maybe|perhaps|probably|could|unsure|uncertain|think|hope|if|unless|whether)\b|not sure/.test(context) || sentence.includes('?')) {
+    throw new DomainError('UNSUPPORTED_FACT');
+  }
+  const noNeed = /\b(?:(?:do not|don't|dont|never|no longer)\s+(?:need|require|want)\s+(?:(?:any|some|the)\s+)?equipment|(?:need|require|want)\s+no\s+equipment|no\s+equipment\s+(?:is\s+)?(?:needed|required|requested)|equipment\s+(?:is\s+)?not\s+(?:needed|required|requested))\b/;
+  const negative = noNeed.test(context);
+  const affirmativeText = context.replace(noNeed, ' ');
+  const positive = /\b(?:need|require|want)\s+(?:(?:any|some|the)\s+)?equipment\b|\bequipment\s+(?:is\s+)?(?:needed|required|requested)\b/.test(affirmativeText);
+  if (negative && positive) throw new DomainError('UNSUPPORTED_FACT');
+  if (negative) return false;
+  if (positive) return true;
+  return undefined;
+}
+
+function validateEquipmentEvidence(source: string, quote: string, start: number, value: boolean): void {
+  const spans = sentenceSpans(source);
+  const sourceClaims = spans.map(span => equipmentClaim(span.text)).filter((claim): claim is boolean => claim !== undefined);
+  if (sourceClaims.length === 0 || sourceClaims.some(claim => claim !== value)) {
+    throw new DomainError('UNSUPPORTED_FACT');
+  }
+
+  for (let occurrence = start; occurrence >= 0; occurrence = source.indexOf(quote, occurrence + 1)) {
+    const span = spans.find(item => occurrence >= item.start && occurrence < item.end);
+    if (!span || equipmentClaim(span.text) !== value) throw new DomainError('UNSUPPORTED_FACT');
+  }
+}
+
 function evidenceFor(source: Source, candidate: Candidate): Evidence {
   validateValue(candidate.field, candidate.value);
   const start = source.text.indexOf(candidate.quote);
@@ -59,26 +103,7 @@ function evidenceFor(source: Source, candidate: Candidate): Evidence {
   if (typeof candidate.value === 'string') {
     if (!candidate.quote.includes(candidate.value)) throw new DomainError('UNSUPPORTED_FACT');
   } else {
-    const quoteEnd = start + candidate.quote.length;
-    const sentenceStart = Math.max(...['.', '!', '?', '\n'].map(boundary => source.text.lastIndexOf(boundary, start - 1))) + 1;
-    const sentenceEnds = ['.', '!', '?', '\n']
-      .map(boundary => source.text.indexOf(boundary, quoteEnd))
-      .filter(index => index >= 0);
-    const sentenceEnd = sentenceEnds.length ? Math.min(...sentenceEnds) : source.text.length;
-    const contextEnd = sentenceEnd < source.text.length && source.text[sentenceEnd] === '?' ? sentenceEnd + 1 : sentenceEnd;
-    const sentence = source.text.slice(sentenceStart, contextEnd);
-    const context = sentence.toLowerCase().replaceAll('\u2019', "'");
-    if (!/\bequipment\b/.test(context) || /\b(might|maybe|perhaps|probably|could|unsure|uncertain|think|hope|if|unless|whether)\b|not sure/.test(context)) {
-      throw new DomainError('UNSUPPORTED_FACT');
-    }
-    if (sentence.includes('?')) throw new DomainError('UNSUPPORTED_FACT');
-    const noNeed = /\b(?:(?:do not|don't|dont|never|no longer)\s+(?:need|require|want)\s+(?:(?:any|some|the)\s+)?equipment|(?:need|require|want)\s+no\s+equipment|no\s+equipment\s+(?:is\s+)?(?:needed|required|requested)|equipment\s+(?:is\s+)?not\s+(?:needed|required|requested))\b/;
-    const negative = noNeed.test(context);
-    const affirmativeText = context.replace(noNeed, ' ');
-    const positive = /\b(?:need|require|want)\s+(?:(?:any|some|the)\s+)?equipment\b|\bequipment\s+(?:is\s+)?(?:needed|required|requested)\b/.test(affirmativeText);
-    if (negative && positive || candidate.value && !positive || !candidate.value && !negative) {
-      throw new DomainError('UNSUPPORTED_FACT');
-    }
+    validateEquipmentEvidence(source.text, candidate.quote, start, candidate.value);
   }
   return { sourceId: source.id, start, end: start + candidate.quote.length, quote: candidate.quote };
 }
@@ -129,6 +154,18 @@ export class Store {
   list(owner: string): Case[] {
     return this.db.prepare('SELECT body FROM cases WHERE owner=? ORDER BY rowid DESC').all(owner)
       .map(row => JSON.parse(String(row.body)) as Case);
+  }
+  pendingMessages(owner: string, caseId: string): PendingMessage[] {
+    this.get(owner,caseId);
+    return this.db.prepare("SELECT expected_revision,source_text,created_at FROM message_reservations WHERE owner=? AND case_id=? AND attempt_token<>'' ORDER BY created_at,key")
+      .all(owner,caseId).map(row => ({
+        expectedRevision:Number(row.expected_revision),text:String(row.source_text),
+        createdAt:String(row.created_at),state:'pending' as const,
+      }));
+  }
+  private hasUnresolvedMessage(owner: string, caseId: string, text: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM message_reservations WHERE owner=? AND case_id=? AND source_text=? AND attempt_token<>'' LIMIT 1")
+      .get(owner,caseId,text);
   }
   committedMessage(owner: string, id: string, revision: number, key: string, text: string): Case | undefined {
     const prior = this.db.prepare('SELECT result FROM operations WHERE owner=? AND key=?').get(owner,key);
@@ -189,6 +226,10 @@ export class Store {
         }
         const current = this.get(owner, caseId);
         if (current.revision !== expectedRevision) throw new DomainError('STALE_REVISION');
+        if (this.hasUnresolvedMessage(owner,caseId,text)) {
+          this.db.exec('COMMIT');
+          return { state:'duplicate' };
+        }
         const attemptToken = randomBytes(16).toString('hex');
         const replaced = this.db.prepare("UPDATE message_reservations SET attempt_token=? WHERE owner=? AND key=? AND case_id=? AND expected_revision=? AND source_text=? AND fingerprint=? AND attempt_token=''")
           .run(attemptToken,owner,key,caseId,expectedRevision,text,fingerprint);
@@ -198,6 +239,10 @@ export class Store {
       }
       const current = this.get(owner, caseId);
       if (current.revision !== expectedRevision) throw new DomainError('STALE_REVISION');
+      if (this.hasUnresolvedMessage(owner,caseId,text)) {
+        this.db.exec('COMMIT');
+        return { state:'duplicate' };
+      }
       const attemptToken = randomBytes(16).toString('hex'), createdAt = new Date().toISOString();
       this.db.prepare('INSERT INTO message_reservations VALUES (?,?,?,?,?,?,?,?)').run(owner,key,caseId,expectedRevision,text,fingerprint,attemptToken,createdAt);
       this.db.exec('COMMIT');

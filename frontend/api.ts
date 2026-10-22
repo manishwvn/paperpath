@@ -1,4 +1,4 @@
-import type { Case, Validation, Field, Value } from '../src/domain.ts';
+import type { Case, Validation, Field, Value, PendingMessage } from '../src/domain.ts';
 
 export class ApiError extends Error {
   code: string;
@@ -13,10 +13,10 @@ export class ApiError extends Error {
 
 export type SessionInfo = { providerReady: boolean; model: string };
 export type CasesList = { cases: Case[] };
-export type PacketResponse = { packet: Case; validation: Validation };
+export type PacketResponse = { packet: Case; validation: Validation; pendingMessages: PendingMessage[] };
 export type ExportArtifact = { name: string; [key: string]: unknown };
 export type ExportRecord = { id: string; revision: number; status: string; artifacts: ExportArtifact[] };
-export type ExportResponse = { packet: Case; validation: Validation; export: ExportRecord };
+export type ExportResponse = PacketResponse & { export: ExportRecord };
 export type DownloadKind = 'application' | 'availability-equipment';
 
 let csrfToken = '';

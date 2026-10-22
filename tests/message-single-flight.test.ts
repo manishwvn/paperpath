@@ -56,6 +56,10 @@ test('message requests preserve owner-scoped replay and pending behavior over HT
   assert.equal(result.midflightProcessCrashRemainsPendingWithoutRetry, true);
   const adapterResult = result.mcpAdapterCompletion as Record<string, unknown>;
   assert.equal(adapterResult.restartPendingReservationKeepsAttemptToken, true);
+  assert.equal(adapterResult.restartGetReturnsOwnerScopedPendingSummaryWithoutToken, true);
+  assert.equal(adapterResult.crossOwnerPendingGet404WithoutDisclosure, true);
+  assert.equal(adapterResult.changedClientKeyDuplicateRejectedWithoutProviderCall, true);
+  assert.equal(adapterResult.manualCorrectionAllowedWhilePendingAndStaleCompletionRejected, true);
   assert.equal(result.sourceEvidenceVerifiedForBothOwners, true);
   assert.equal(result.runtimeEvidenceScope,
     'Production HTTP route, MCP transport, and domain validator; no browser UI and not a complete missing/conflict/unsupported journey.');

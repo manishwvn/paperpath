@@ -169,6 +169,132 @@ test('reopened database keeps pending reservation unacquired without replacement
   }
 });
 
+test('pending summary survives reopen, stays owner-scoped, blocks a changed key, and permits correction', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'paperpath-pending-summary-'));
+  const databasePath = join(directory, 'paperpath.sqlite');
+  const stores: Store[] = [];
+  try {
+    const firstStore = new Store(databasePath);
+    stores.push(firstStore);
+    const owner = firstStore.session();
+    const created = firstStore.create(owner, reservationKey());
+    const key = reservationKey();
+    const text = validSource;
+    const reservation = firstStore.reserveMessage(owner, created.id, created.revision, key, text);
+    assert.equal(reservation.state, 'pending');
+    if (reservation.state !== 'pending') assert.fail('expected pending');
+    assert.equal(reservation.acquired, true);
+    if (!reservation.acquired) assert.fail('expected acquired');
+
+    const initial = firstStore.pendingMessages(owner, created.id);
+    assert.equal(initial.length, 1);
+    assert.equal(initial[0]?.text, text);
+    assert.equal(initial[0]?.expectedRevision, created.revision);
+    assert.equal(initial[0]?.state, 'pending');
+    assert.ok(initial[0]?.createdAt);
+    assert.deepEqual(Object.keys(initial[0] ?? {}).sort(), ['createdAt', 'expectedRevision', 'state', 'text']);
+    assert.equal(JSON.stringify(initial).includes(reservation.attemptToken), false);
+    assert.throws(
+      () => firstStore.pendingMessages(randomUUID(), created.id),
+      (error: unknown) => error instanceof DomainError && error.code === 'CASE_NOT_FOUND',
+    );
+
+    firstStore.close();
+    stores.splice(stores.indexOf(firstStore), 1);
+    const store = new Store(databasePath);
+    stores.push(store);
+    assert.deepEqual(store.pendingMessages(owner, created.id), initial);
+
+    assert.deepEqual(
+      store.reserveMessage(owner, created.id, created.revision, reservationKey(), text),
+      { state: 'duplicate' },
+    );
+    const corrected = store.correct(owner, created.id, created.revision, reservationKey(), 'name', 'Nora Grey');
+    assert.equal(corrected.revision, created.revision + 1);
+    assert.deepEqual(store.pendingMessages(owner, created.id), initial);
+    expectDomainError(
+      () => store.completeMessage(owner, created.id, created.revision, key, text, reservation.attemptToken, completeCandidates),
+      'STALE_REVISION',
+    );
+    assert.deepEqual(store.pendingMessages(owner, created.id), initial);
+  } finally {
+    for (const store of stores) store.close();
+    await cleanupOwnedDirectory(directory);
+  }
+});
+
+test('unresolved same-text reservation blocks a fresh key after manual correction', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'paperpath-pending-duplicate-order-'));
+  const databasePath = join(directory, 'paperpath.sqlite');
+  const stores: Store[] = [];
+  try {
+    const store = new Store(databasePath);
+    stores.push(store);
+    const owner = store.session();
+    const pendingCase = store.create(owner, reservationKey());
+    const unresolvedText = 'A pending message that remains unresolved after manual correction.';
+    const oldRevisionKey = reservationKey();
+    const oldRevisionAttempt = store.reserveMessage(owner, pendingCase.id, pendingCase.revision,
+      oldRevisionKey, unresolvedText);
+    assert.equal(oldRevisionAttempt.state, 'pending');
+    if (oldRevisionAttempt.state !== 'pending') assert.fail('expected pending');
+    assert.equal(oldRevisionAttempt.acquired, true);
+    if (!oldRevisionAttempt.acquired) assert.fail('expected acquired');
+    const corrected = store.correct(owner, pendingCase.id, pendingCase.revision, reservationKey(), 'name', 'Nora Grey');
+    assert.deepEqual(
+      store.reserveMessage(owner, pendingCase.id, corrected.revision, reservationKey(), unresolvedText),
+      { state: 'duplicate' },
+    );
+  } finally {
+    for (const store of stores) store.close();
+    await cleanupOwnedDirectory(directory);
+  }
+});
+
+test('released known-not-started reservation permits fresh-key retry and orders reacquisition', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'paperpath-released-fresh-key-'));
+  const databasePath = join(directory, 'paperpath.sqlite');
+  const stores: Store[] = [];
+  try {
+    const store = new Store(databasePath);
+    stores.push(store);
+    const owner = store.session();
+    const packet = store.create(owner, reservationKey());
+    const text = 'A message known not to have started.';
+    const oldKey = reservationKey();
+    const original = store.reserveMessage(owner, packet.id, packet.revision, oldKey, text);
+    assert.equal(original.state, 'pending');
+    if (original.state !== 'pending') assert.fail('expected pending');
+    assert.equal(original.acquired, true);
+    if (!original.acquired) assert.fail('expected acquired');
+    store.releaseMessage(owner, packet.id, packet.revision, oldKey, text, original.attemptToken, 'not-started');
+
+    const freshKey = reservationKey();
+    const retry = store.reserveMessage(owner, packet.id, packet.revision, freshKey, text);
+    assert.equal(retry.state, 'pending', 'a released row must not block a new key');
+    if (retry.state !== 'pending') assert.fail('expected pending');
+    assert.equal(retry.acquired, true);
+    if (!retry.acquired) assert.fail('expected acquired');
+    assert.notEqual(retry.attemptToken, original.attemptToken);
+    assert.deepEqual(
+      store.reserveMessage(owner, packet.id, packet.revision, oldKey, text),
+      { state: 'duplicate' },
+      'an unresolved fresh-key retry prevents reacquisition of an older released row',
+    );
+
+    store.releaseMessage(owner, packet.id, packet.revision, freshKey, text, retry.attemptToken, 'not-started');
+    const reacquired = store.reserveMessage(owner, packet.id, packet.revision, oldKey, text);
+    assert.equal(reacquired.state, 'pending');
+    if (reacquired.state !== 'pending') assert.fail('expected pending');
+    assert.equal(reacquired.acquired, true);
+    if (!reacquired.acquired) assert.fail('expected acquired');
+    assert.notEqual(reacquired.attemptToken, original.attemptToken);
+  } finally {
+    for (const store of stores) store.close();
+    await cleanupOwnedDirectory(directory);
+  }
+});
+
 test('changed text case revision conflicts but same key under different owner acquires', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'paperpath-reservation-'));
   const databasePath = join(directory, 'paperpath.sqlite');
@@ -396,6 +522,11 @@ test('owned reservation completes once and replays the current corrected case af
     const reopened = new Store(databasePath);
     stores.push(reopened);
     const corrected = reopened.correct(owner, created.id, completed.revision, reservationKey(), 'name', 'Nora Grey');
+    const pendingAfterCompletion = reopened.reserveMessage(owner, created.id, corrected.revision,
+      reservationKey(), validSource);
+    assert.equal(pendingAfterCompletion.state, 'pending');
+    if (pendingAfterCompletion.state !== 'pending') assert.fail('expected pending');
+    assert.equal(pendingAfterCompletion.acquired, true);
     const replay = reopened.reserveMessage(owner, created.id, created.revision, key, validSource);
     assert.equal(replay.state, 'completed');
     if (replay.state !== 'completed') assert.fail('expected completed');
