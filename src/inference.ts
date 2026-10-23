@@ -22,7 +22,7 @@ export function getExtractionOutcome(error: unknown): ExtractionOutcome | undefi
   return undefined;
 }
 
-export async function extractCandidates(text: string, candidateJsonSchema: unknown, options: { key?: string; model: string; fetcher?: typeof fetch }): Promise<Candidate[]> {
+export async function extractCandidates(text: string, candidateJsonSchema: unknown, options: { key?: string; model: string; fetcher?: typeof fetch; beforeProviderRequest?: () => void }): Promise<Candidate[]> {
   if (!options.key) {
     throw toExtractionError('GROQ_KEY_REQUIRED', 'not-started');
   }
@@ -57,6 +57,7 @@ export async function extractCandidates(text: string, candidateJsonSchema: unkno
   } catch {
     throw toExtractionError('PROVIDER_REQUEST_FAILED', 'not-started');
   }
+  options.beforeProviderRequest?.();
   let response: Response;
   try {
     response = await fetcher('https://api.groq.com/openai/v1/chat/completions', {

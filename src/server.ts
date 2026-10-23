@@ -13,12 +13,15 @@ import { Store, DomainError, candidateSchema, fields, validatePacket } from './d
 import type { Case } from './domain.ts';
 import { formNames, prepareExport } from './pdf.ts';
 import { extractCandidates, getExtractionOutcome } from './inference.ts';
+import { createReviewProviderRequestBudget, parseReviewProviderRequestLimit } from './review-budget.ts';
 import { configureOrigins } from './origins.ts';
 import type { Request, Response, NextFunction } from 'express';
 
 process.umask(0o077);
 const port = Number(process.env.PORT ?? '4317');
 if (!Number.isInteger(port) || port<1024 || port>65535) throw new Error('INVALID_PORT');
+const reviewProviderRequestLimit = parseReviewProviderRequestLimit(process.env.PAPERPATH_REVIEW_REQUEST_LIMIT);
+const reviewProviderRequestBudget = createReviewProviderRequestBudget(reviewProviderRequestLimit);
 const originConfig = configureOrigins(process.env.PAPERPATH_PUBLIC_ORIGINS,port);
 const runtime = resolve(process.env.PAPERPATH_DATA_DIR ?? '.local');
 await mkdir(runtime,{recursive:true,mode:0o700});
@@ -206,7 +209,11 @@ app.post('/api/cases/:caseId/message',async(req,res)=>{
         const candidatesSchema = proposal?.inputSchema.properties?.candidates;
         if (!candidatesSchema) throw new DomainError('MCP_SCHEMA_UNAVAILABLE');
         extractionAttempted = true;
-        const candidates = await extractCandidates(args.text,candidatesSchema,{key:process.env.GROQ_API_KEY,model});
+        const candidates = await extractCandidates(args.text,candidatesSchema,{key:process.env.GROQ_API_KEY,model,
+          beforeProviderRequest:()=>{
+            const used=reviewProviderRequestBudget.beforeRequest();
+            if (reviewProviderRequestLimit!==undefined) console.log(`Provider review request ${used}/${reviewProviderRequestLimit}`);
+          }});
         completingMessage = true;
         await call<Case>(client,'complete_message',{caseId,expectedRevision:args.expectedRevision,
           idempotencyKey:args.idempotencyKey,sourceText:args.text,attemptToken:reservation.attemptToken,candidates});
@@ -278,8 +285,10 @@ app.use(express.static(fileURLToPath(new URL('../dist/frontend/',import.meta.url
 app.use((error:unknown,_req:Request,res:Response,_next:NextFunction)=>{
   void _next;
   const code = error instanceof DomainError?error.code:error instanceof z.ZodError?'INVALID_INPUT':'INTERNAL_ERROR';
-  const status = /STALE|CONFLICT|PENDING/.test(code)?409:/NOT_FOUND/.test(code)?404:/PROVIDER|GROQ/.test(code)?503:code==='INTERNAL_ERROR'?500:400;
-  const message = code==='UNSUPPORTED_FACT'
+  const status = code==='REVIEW_PROVIDER_LIMIT'?429:/STALE|CONFLICT|PENDING/.test(code)?409:/NOT_FOUND/.test(code)?404:/PROVIDER|GROQ/.test(code)?503:code==='INTERNAL_ERROR'?500:400;
+  const message = code==='REVIEW_PROVIDER_LIMIT'
+    ? 'Three-request review limit reached. This message was not sent; manual correction remains available.'
+    : code==='UNSUPPORTED_FACT'
     ? 'That fact was not clearly supported by your message. Please restate the detail you want included.'
     : code==='UNSUPPORTED_EVIDENCE'
       ? 'The supporting words could not be matched to your message. Please restate the detail exactly.'

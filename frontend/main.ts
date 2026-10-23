@@ -459,6 +459,7 @@ function friendly(e: unknown): string {
     if (e.code === 'STALE_REVISION') return 'This case changed. Refreshed to the current revision. Please review before retrying.';
     if (e.code === 'MESSAGE_PENDING') return 'This message is still pending and may have completed. Your text is still here, and the case is saved. Select “Resume case” to check the latest state; do not resubmit this message.';
     if (e.code === 'MESSAGE_DUPLICATE_CONFLICT') return 'This exact message was already attempted at this case revision. No new provider attempt was started. Edit the text or make a manual correction.';
+    if (e.code === 'REVIEW_PROVIDER_LIMIT') return 'Three-request review limit reached. This message was not sent; manual correction remains available.';
     if (e.code === 'UNSUPPORTED_FACT') return 'That fact was not clearly supported by your message. Please restate the detail you want included.';
     if (e.code === 'UNSUPPORTED_EVIDENCE') return 'The supporting words could not be matched to your message. Please restate the detail exactly.';
     if (e.code === 'invalid_response') return 'The response could not be read. Your text was kept; check the saved message history before trying again.';

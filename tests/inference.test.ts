@@ -51,12 +51,13 @@ function okResponse(candidates: unknown): Response {
 
 test('missing key fails before fetch with not-started', async () => {
   let calls = 0;
+  let gateCalls = 0;
   const fetcher = (async () => {
     calls += 1;
     return new Response('{}', { status: 200 });
   }) as unknown as typeof fetch;
   try {
-    await extractCandidates(MESSAGE, {}, { model: MODEL, fetcher });
+    await extractCandidates(MESSAGE, {}, { model: MODEL, fetcher, beforeProviderRequest: () => { gateCalls += 1; } });
     assert.fail('expected missing key to throw');
   } catch (err) {
     assert.ok(err instanceof DomainError);
@@ -64,11 +65,13 @@ test('missing key fails before fetch with not-started', async () => {
     assert.equal((err as DomainError).code, 'GROQ_KEY_REQUIRED');
     assert.equal(getExtractionOutcome(err), 'not-started');
     assert.equal(calls, 0);
+    assert.equal(gateCalls, 0);
   }
 });
 
 test('serialization failure fails before fetch with not-started', async () => {
   let calls = 0;
+  let gateCalls = 0;
   const fetcher = (async () => {
     calls += 1;
     return new Response('{}', { status: 200 });
@@ -76,12 +79,13 @@ test('serialization failure fails before fetch with not-started', async () => {
   const circular: Record<string, unknown> = {};
   circular.self = circular;
   try {
-    await extractCandidates(MESSAGE, circular, { key: KEY, model: MODEL, fetcher });
+    await extractCandidates(MESSAGE, circular, { key: KEY, model: MODEL, fetcher, beforeProviderRequest: () => { gateCalls += 1; } });
     assert.fail('expected serialization to throw');
   } catch (err) {
     assert.ok(err instanceof DomainError);
     assert.equal(getExtractionOutcome(err), 'not-started');
     assert.equal(calls, 0);
+    assert.equal(gateCalls, 0);
   }
 });
 
