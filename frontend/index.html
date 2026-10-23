@@ -74,7 +74,7 @@
         <div class="field">
           <label for="message-input">Describe the applicant</label>
           <p class="hint" id="message-input-hint">Include availability, equipment, contact details, or motivation.</p>
-          <textarea id="message-input" name="message" rows="4" aria-describedby="message-input-hint" placeholder="Example: I am available weekday evenings and need a loan laptop."></textarea>
+          <textarea id="message-input" name="message" rows="4" aria-describedby="message-input-hint" placeholder="Example: My name is Taylor Sample. My email is taylor@example.com. I am available Wednesdays. I need equipment."></textarea>
         </div>
         <button type="submit" id="message-submit" disabled>Send message</button>
       </form>
@@ -129,6 +129,12 @@
         <span class="status-stamp" id="packet-status">Draft — not yet confirmed for practice</span>
       </div>
       <p class="packet-intro">Unknown or conflicting answers stay marked. Read the evidence before you confirm for practice.</p>
+      <section class="next-question" id="next-question" aria-labelledby="next-question-heading" aria-live="polite" hidden>
+        <h3 id="next-question-heading">Next question</h3>
+        <p id="next-question-text"></p>
+        <ul id="next-question-evidence"></ul>
+        <button type="button" id="resolve-next-question" disabled>Answer this question</button>
+      </section>
       <div class="form-previews">
         <article aria-labelledby="volunteer-form-heading" id="preview-volunteer-application" class="paper-form">
           <p class="form-kicker">Form 1 <span>Volunteer services</span></p>

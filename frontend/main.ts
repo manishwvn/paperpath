@@ -1,6 +1,7 @@
 import { initSession, listCases, getCase, createCase, sendMessage, correctFact, confirmFacts, exportPacket, getDownloadUrl, ApiError } from './api.ts';
 import type { Case, Validation, Field, Value, PendingMessage } from '../src/domain.ts';
 import type { PacketResponse } from './api.ts';
+import { nextResolution } from './next-question.ts';
 
 const STORE_KEY = 'paperpath.caseId';
 const THEME_STORE_KEY = 'paperpath.theme';
@@ -248,6 +249,40 @@ function renderEvidence(): void {
   const miss = missingFields();
   const conf = conflictFields();
   const need: Field[] = [...new Set([...miss, ...conf])];
+  const next = nextResolution(validation);
+  const nextQuestion = $('next-question');
+  const nextText = $('next-question-text');
+  const nextEvidence = $('next-question-evidence');
+  const nextButton = $('resolve-next-question');
+  if (nextQuestion instanceof HTMLElement) nextQuestion.hidden = next === null;
+  if (nextText) {
+    if (next?.kind === 'conflict') {
+      const label = next.field.charAt(0).toUpperCase() + next.field.slice(1);
+      nextText.textContent = `The notes disagree about ${label.toLowerCase()}. Which answer should go on the packet?`;
+    } else if (next) {
+      nextText.textContent = questionFor(next.field);
+    } else {
+      nextText.textContent = 'All required facts have evidence. Motivation is optional; review the packet below.';
+    }
+  }
+  if (nextEvidence) {
+    while (nextEvidence.firstChild) nextEvidence.removeChild(nextEvidence.firstChild);
+    const fact = next?.kind === 'conflict' ? packet?.facts[next.field] : undefined;
+    if (next && fact) {
+      const variants = [{ value: fact.value, evidence: fact.evidence }, ...fact.conflicts];
+      for (const variant of variants) {
+        const sourceIndex = packet?.sources.findIndex((source) => source.id === variant.evidence.sourceId) ?? -1;
+        const item = document.createElement('li');
+        const sourceLabel = sourceIndex >= 0 ? 'Source ' + String(sourceIndex + 1) : 'Source unavailable';
+        item.textContent = `${fmt(next.field, variant.value)} — ${sourceLabel}: “${variant.evidence.quote}”`;
+        nextEvidence.appendChild(item);
+      }
+    }
+  }
+  if (nextButton instanceof HTMLButtonElement) {
+    nextButton.textContent = next?.kind === 'conflict' ? 'Resolve this conflict' : 'Answer this question';
+    nextButton.disabled = busy || !caseId || next === null;
+  }
   const fieldNames: Record<Field, string> = {
     name: 'Name', email: 'Email', availability: 'Availability',
     equipment: 'Equipment', motivation: 'Motivation'
@@ -371,11 +406,13 @@ function updateButtons(): void {
   const input = $('case-id-input');
   const inputVal = input instanceof HTMLInputElement ? input.value.trim() : '';
   if (resBtn instanceof HTMLButtonElement) resBtn.disabled = busy || inputVal === '';
+  const nextBtn = $('resolve-next-question');
+  if (nextBtn instanceof HTMLButtonElement) nextBtn.disabled = busy || !hasCase || nextResolution(validation) === null;
 }
 function setBusy(on: boolean): void {
   busy = on;
   if (on) {
-    const ids: string[] = ['message-submit', 'correction-availability-apply', 'facts-confirm-button', 'export-button', 'case-create-button', 'case-resume-button'];
+    const ids: string[] = ['message-submit', 'correction-availability-apply', 'resolve-next-question', 'facts-confirm-button', 'export-button', 'case-create-button', 'case-resume-button'];
     for (const id of ids) {
       const b = $(id);
       if (b instanceof HTMLButtonElement) b.disabled = true;
@@ -507,6 +544,29 @@ function currentField(): Field {
   const s = fieldSelect();
   const v = s ? s.value : 'availability';
   return isField(v) ? v : 'availability';
+}
+function resolveNextQuestion(): void {
+  const next = nextResolution(validation);
+  if (!next || busy || !caseId) return;
+  const select = fieldSelect();
+  const input = $('correction-availability-input');
+  const equipment = $('correction-equipment-input');
+  const valueInput = input instanceof HTMLInputElement ? input : null;
+  const equipmentSelect = equipment instanceof HTMLSelectElement ? equipment : null;
+  if (valueInput) valueInput.value = '';
+  if (equipmentSelect) equipmentSelect.value = '';
+  if (select) {
+    select.value = next.field;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  const disclosure = $('resolve-section');
+  if (disclosure instanceof HTMLDetailsElement) disclosure.open = true;
+  updateButtons();
+  const target = next.field === 'equipment' ? equipmentSelect : valueInput;
+  if (target instanceof HTMLElement) {
+    target.focus();
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
 }
 async function doCreate(): Promise<void> {
   if (busy) return;
@@ -773,6 +833,8 @@ async function init(): Promise<void> {
     e.preventDefault();
     void doSend();
   });
+  const nextQuestionButton = $('resolve-next-question');
+  if (nextQuestionButton) nextQuestionButton.addEventListener('click', resolveNextQuestion);
   const corForm = $('correction-form');
   if (corForm) corForm.addEventListener('submit', (e) => {
     e.preventDefault();

@@ -274,6 +274,12 @@ button:disabled { border-color: var(--disabled-bg); background: var(--disabled-b
 .status-stamp { max-width: 100%; padding: .35rem .65rem; border: 1px solid var(--line-strong); border-radius: 99rem; background: var(--accent-soft); color: var(--accent); font-size: .82rem; font-weight: 700; overflow-wrap: anywhere; }
 #packet-status { color: inherit; }
 .packet-intro { margin-bottom: .5rem; }
+.next-question { margin: .8rem 0; padding: .85rem .95rem; border-left: .25rem solid var(--accent); border-radius: 0 .45rem .45rem 0; background: var(--accent-soft); color: var(--ink); }
+.next-question h3 { margin: 0 0 .35rem; font-size: 1rem; }
+.next-question p { margin: 0 0 .5rem; }
+.next-question ul { padding-left: 1.2rem; margin: .35rem 0 .65rem; }
+.next-question li { margin: .35rem 0; overflow-wrap: anywhere; }
+#next-question-evidence li { overflow-wrap: anywhere; }
 .evidence-section { margin-top: .8rem; }
 #evidence-list > .evidence-item { margin: 0; padding: .55rem 0; border-bottom: 1px solid var(--line); }
 .evidence-item summary { color: var(--ink); font-size: .91rem; line-height: 1.45; overflow-wrap: anywhere; }

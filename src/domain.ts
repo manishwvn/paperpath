@@ -1,9 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { fields, requiredFields } from './fields.ts';
+import type { Field } from './fields.ts';
 
-export const fields = ['name', 'email', 'availability', 'equipment', 'motivation'] as const;
-export type Field = typeof fields[number];
+export { fields, requiredFields } from './fields.ts';
+export type { Field } from './fields.ts';
 export type Value = string | boolean;
 export const candidateSchema = z.object({
   field: z.enum(fields), value: z.union([z.string().min(1).max(1000), z.boolean()]),
@@ -33,10 +35,8 @@ export class DomainError extends Error {
   constructor(code: string) { super(code); this.code = code; }
 }
 const hash = (input: string) => createHash('sha256').update(input).digest('hex');
-const required: Field[] = ['name', 'email', 'availability', 'equipment'];
-
 export function validatePacket(packet: Case): Validation {
-  const missing = required.filter(field => packet.facts[field] === undefined);
+  const missing = requiredFields.filter(field => packet.facts[field] === undefined);
   const conflicts = fields.filter(field => (packet.facts[field]?.conflicts.length ?? 0) > 0);
   return { complete: missing.length === 0 && conflicts.length === 0, missing, conflicts };
 }
