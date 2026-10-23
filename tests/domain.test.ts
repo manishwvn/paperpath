@@ -253,6 +253,42 @@ test('an explicit equipment negation supports a false proposal', async () => {
   });
 });
 
+test('equipment proposals check every source claim and preserve a quote-ending sentence boundary', async () => {
+  await withStore((store, owner, caseId) => {
+    const contradictory = 'I need equipment. I do not need equipment.';
+    const before = store.get(owner, caseId);
+    for (const value of [true, false]) {
+      expectDomainError(() => store.propose(owner, caseId, before.revision, idempotencyKey(), contradictory, [
+        { field: 'equipment', value, quote: 'I need equipment' },
+      ]), 'UNSUPPORTED_FACT');
+      assert.deepEqual(store.get(owner, caseId), before);
+    }
+
+    const negative = store.propose(owner, caseId, before.revision, idempotencyKey(),
+      'I do not need equipment. I hope to volunteer.', [
+        { field: 'equipment', value: false, quote: 'I do not need equipment.' },
+      ]);
+    assert.equal(negative.facts.equipment?.value, false);
+
+    const positive = store.propose(owner, caseId, negative.revision, idempotencyKey(),
+      'I need equipment. I hope to volunteer.', [
+        { field: 'equipment', value: true, quote: 'I need equipment.' },
+      ]);
+    assert.equal(positive.facts.equipment?.value, false);
+    assert.deepEqual(positive.facts.equipment?.conflicts.map(item => item.value), [true]);
+  });
+});
+
+test('repeated evidence quotes cannot hide conflicting equipment claims elsewhere in the source', async () => {
+  await withStore((store, owner, caseId) => {
+    const source = 'I need equipment. I do not need equipment. I need equipment.';
+    expectDomainError(() => store.propose(owner, caseId, 1, idempotencyKey(), source, [
+      { field: 'equipment', value: true, quote: 'I need equipment' },
+    ]), 'UNSUPPORTED_FACT');
+    assert.equal(store.get(owner, caseId).revision, 1);
+  });
+});
+
 test('an uncertain equipment statement does not support a positive proposal', async () => {
   await withStore((store, owner, caseId) => {
     const uncertain = 'I am not sure whether I need equipment.';
@@ -272,6 +308,44 @@ test('an uncertain equipment statement does not support a negative proposal', as
       { field: 'equipment', value: false, quote: uncertain },
     ]), 'UNSUPPORTED_FACT');
   });
+});
+
+test('clipped, conditional, uncertain, and contradictory equipment evidence cannot decide a boolean', async () => {
+  const ambiguous = [
+    { source: 'If I need equipment, I will ask.', quote: 'I need equipment' },
+    { source: 'I think I need equipment.', quote: 'I need equipment' },
+    { source: 'I need equipment, but I do not need any equipment.', quote: 'I need equipment' },
+  ];
+
+  for (const { source, quote } of ambiguous) {
+    await withStore((store, owner, caseId) => {
+      const before = store.get(owner, caseId);
+      for (const value of [true, false]) {
+        expectDomainError(() => store.propose(owner, caseId, before.revision, idempotencyKey(), source, [
+          { field: 'equipment', value, quote },
+        ]), 'UNSUPPORTED_FACT');
+        assert.deepEqual(store.get(owner, caseId), before);
+      }
+    });
+  }
+
+  for (const { source, quote } of [
+    { source: 'I do not need equipment.', quote: 'need equipment' },
+    { source: 'I never need equipment.', quote: 'need equipment' },
+  ]) {
+    await withStore((store, owner, caseId) => {
+      const before = store.get(owner, caseId);
+      expectDomainError(() => store.propose(owner, caseId, before.revision, idempotencyKey(), source, [
+        { field: 'equipment', value: true, quote },
+      ]), 'UNSUPPORTED_FACT');
+      assert.deepEqual(store.get(owner, caseId), before);
+
+      const packet = store.propose(owner, caseId, before.revision, idempotencyKey(), source, [
+        { field: 'equipment', value: false, quote },
+      ]);
+      assert.equal(packet.facts.equipment?.value, false);
+    });
+  }
 });
 
 test('equipment ownership and contradictory requests cannot prove no equipment is needed', async () => {
@@ -303,6 +377,22 @@ test('committed message recovery returns current state and rejects changed reque
     assert.equal(store.get(owner, caseId).sources.length, 2);
     expectDomainError(() => store.committedMessage(owner, caseId, 1, key, 'Different input'), 'IDEMPOTENCY_CONFLICT');
     expectDomainError(() => store.committedMessage(owner, caseId, 2, key, completeSource), 'IDEMPOTENCY_CONFLICT');
+    const operationBefore = store.db.prepare('SELECT payload_hash, result FROM operations WHERE owner=? AND key=?').get(owner, key);
+    const caseBefore = store.db.prepare('SELECT body FROM cases WHERE id=? AND owner=?').get(caseId, owner);
+    assert.ok(operationBefore);
+    assert.ok(caseBefore);
+    const corrupted = JSON.parse(String(operationBefore.result)) as { sources: Array<{ sha256: string }> };
+    const lastSource = corrupted.sources.at(-1);
+    assert.ok(lastSource);
+    lastSource.sha256 = 'corrupted-sha256';
+    store.db.prepare('UPDATE operations SET result=? WHERE owner=? AND key=?').run(JSON.stringify(corrupted), owner, key);
+    expectDomainError(() => store.committedMessage(owner, caseId, 1, key, completeSource), 'IDEMPOTENCY_CONFLICT');
+    const operationAfter = store.db.prepare('SELECT payload_hash FROM operations WHERE owner=? AND key=?').get(owner, key);
+    const caseAfter = store.db.prepare('SELECT body FROM cases WHERE id=? AND owner=?').get(caseId, owner);
+    assert.ok(operationAfter);
+    assert.ok(caseAfter);
+    assert.equal(operationAfter.payload_hash, operationBefore.payload_hash);
+    assert.equal(caseAfter.body, caseBefore.body);
   });
 });
 

@@ -7,17 +7,22 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { z } from 'zod';
 import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Store, DomainError, candidateSchema, fields, validatePacket } from './domain.ts';
 import type { Case } from './domain.ts';
 import { formNames, prepareExport } from './pdf.ts';
-import { extractCandidates } from './inference.ts';
+import { extractCandidates, getExtractionOutcome } from './inference.ts';
+import { createReviewProviderRequestBudget, parseReviewProviderRequestLimit } from './review-budget.ts';
+import { configureOrigins } from './origins.ts';
 import type { Request, Response, NextFunction } from 'express';
 
 process.umask(0o077);
 const port = Number(process.env.PORT ?? '4317');
 if (!Number.isInteger(port) || port<1024 || port>65535) throw new Error('INVALID_PORT');
+const reviewProviderRequestLimit = parseReviewProviderRequestLimit(process.env.PAPERPATH_REVIEW_REQUEST_LIMIT);
+const reviewProviderRequestBudget = createReviewProviderRequestBudget(reviewProviderRequestLimit);
+const originConfig = configureOrigins(process.env.PAPERPATH_PUBLIC_ORIGINS,port);
 const runtime = resolve(process.env.PAPERPATH_DATA_DIR ?? '.local');
 await mkdir(runtime,{recursive:true,mode:0o700});
 const secretPath = join(runtime,'service-secret.txt');
@@ -26,10 +31,11 @@ catch (error) { if ((error as NodeJS.ErrnoException).code!=='EEXIST') throw erro
 const secret = (await readFile(secretPath,'utf8')).trim();
 const store = new Store(join(runtime,'paperpath.sqlite'));
 const base = `http://127.0.0.1:${port}`;
-const origins = new Set([base,`http://localhost:${port}`]);
+const { origins, publicOrigins, authorities, hostnames, originAuthorities } = originConfig;
+const secureAuthorities = new Set([...publicOrigins].map(origin => new URL(origin).host));
 const model = process.env.GROQ_MODEL ?? 'openai/gpt-oss-20b';
 const approvals = new Map<string,{owner:string;id:string;revision:number}>();
-const app = createMcpExpressApp({host:'127.0.0.1'});
+const app = createMcpExpressApp({host:'127.0.0.1',allowedHosts:[...hostnames]});
 const equal = (a:string,b:string) => {
   const left = Buffer.from(a), right = Buffer.from(b);
   return left.length===right.length && timingSafeEqual(left,right);
@@ -39,7 +45,10 @@ const uuid = z.string().uuid();
 const mutation = z.object({expectedRevision:z.number().int().positive(),idempotencyKey:z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/)});
 
 app.use((req,res,next)=>{
-  if (!origins.has(`http://${req.headers.host}`) || (req.headers.origin && !origins.has(req.headers.origin))) {
+  const authority = req.headers.host ?? '';
+  const origin = req.headers.origin;
+  if (!authorities.has(authority) || (origin !== undefined &&
+      (!origins.has(origin) || originAuthorities.get(origin)!==authority))) {
     return res.status(403).json({error:'INVALID_ORIGIN_OR_HOST'});
   }
   res.setHeader('X-Content-Type-Options','nosniff');
@@ -62,6 +71,20 @@ function toolServer(owner:string, approval?:string) {
     inputSchema:{idempotencyKey:z.string()}},args=>output(()=>store.create(owner,args.idempotencyKey)));
   server.registerTool('get_case',{description:'Read the current owned packet and evidence.',inputSchema:{caseId:uuid}},
     args=>output(()=>store.get(owner,args.caseId)));
+  const completeMessageArgs = z.object({
+    caseId:uuid,
+    expectedRevision:z.number().int().positive(),
+    idempotencyKey:z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/),
+    sourceText:z.string().min(1).max(4000),
+    attemptToken:z.string().regex(/^[a-f0-9]{32}$/),
+    candidates:z.array(candidateSchema).max(5),
+  }).strict();
+  server.registerTool('complete_message',{description:'Complete an already acquired owned message reservation.',
+    inputSchema:completeMessageArgs},args=>output(()=>{
+      const input = completeMessageArgs.parse(args);
+      return store.completeMessage(owner,input.caseId,input.expectedRevision,input.idempotencyKey,
+        input.sourceText,input.attemptToken,input.candidates);
+    }));
   const revisionArgs = {caseId:uuid,expectedRevision:z.number().int().positive(),idempotencyKey:z.string()};
   server.registerTool('propose_facts',{description:'Propose facts explicitly supported by immutable applicant text; differing values become conflicts.',
     inputSchema:{...revisionArgs,sourceText:z.string().min(1).max(4000),candidates:z.array(candidateSchema).max(5)}},
@@ -132,7 +155,7 @@ app.use('/api',(req,res,next)=>{
   const owner = store.session(cookie);
   res.locals.owner = owner;
   res.setHeader('Cache-Control','no-store');
-  if (cookie!==owner) res.cookie('paperpath_session',owner,{httpOnly:true,sameSite:'strict',maxAge:90*24*60*60*1000,path:'/'});
+  if (cookie!==owner) res.cookie('paperpath_session',owner,{httpOnly:true,sameSite:'strict',secure:secureAuthorities.has(req.get('Host')??''),maxAge:90*24*60*60*1000,path:'/'});
   if (!['GET','HEAD'].includes(req.method)) {
     if (!req.headers.origin || !origins.has(req.headers.origin) || !equal(req.get('X-PaperPath-CSRF')??'',csrf(owner))) {
       return res.status(403).json({error:'BROWSER_AUTH_REQUIRED'});
@@ -143,39 +166,81 @@ app.use('/api',(req,res,next)=>{
 app.get('/health',(_req,res)=>res.json({ok:true,application:'PaperPath',protocol:'2025-11-25'}));
 app.get('/api/session',(_req,res)=>res.json({csrf:csrf(res.locals.owner),providerReady:!!process.env.GROQ_API_KEY,model}));
 app.get('/api/cases',(_req,res)=>res.json({cases:store.list(res.locals.owner)}));
-const state = (packet:Case)=>({packet,validation:validatePacket(packet)});
+const state = (packet:Case,owner:string)=>({packet,validation:validatePacket(packet),pendingMessages:store.pendingMessages(owner,packet.id)});
 app.post('/api/cases',async(req,res)=>{
   const args = z.object({idempotencyKey:z.string().min(8).max(100)}).strict().parse(req.body);
   const packet = await withMcp(res.locals.owner,async client=>{
     const created = await call<Case>(client,'create_case',args);
     return call<Case>(client,'get_case',{caseId:created.id});
   });
-  res.json(state(packet));
+  res.json(state(packet,res.locals.owner));
 });
 app.get('/api/cases/:caseId',async(req,res)=>{
   const caseId = uuid.parse(req.params.caseId);
   const packet = await withMcp(res.locals.owner,client=>call<Case>(client,'get_case',{caseId}));
-  res.json(state(packet));
+  res.json(state(packet,res.locals.owner));
 });
+// Process-local in-flight dedup only; does not survive restart.
+const messageInflight = new Map<string, { fingerprint: string; promise: Promise<Case> }>();
 app.post('/api/cases/:caseId/message',async(req,res)=>{
   const caseId = uuid.parse(req.params.caseId);
   const args = mutation.extend({text:z.string().min(1).max(4000)}).strict().parse(req.body);
-  const packet = await withMcp(res.locals.owner,async client=>{
-    if (store.committedMessage(res.locals.owner,caseId,args.expectedRevision,args.idempotencyKey,args.text)) {
-      return call<Case>(client,'get_case',{caseId});
+  const fingerprint = createHash('sha256').update(JSON.stringify({caseId,expectedRevision:args.expectedRevision,text:args.text})).digest('hex');
+  const inflightKey = `${res.locals.owner}\0${args.idempotencyKey}`;
+  const inflightHit = messageInflight.get(inflightKey);
+  if (inflightHit) {
+    if (inflightHit.fingerprint!==fingerprint) throw new DomainError('IDEMPOTENCY_CONFLICT');
+    const packet = await inflightHit.promise;
+    res.json(state(packet,res.locals.owner));
+    return;
+  }
+  const task = (async()=>{
+    const reservation = store.reserveMessage(res.locals.owner,caseId,args.expectedRevision,args.idempotencyKey,args.text);
+    if (reservation.state==='completed') return reservation.packet;
+    if (reservation.state==='duplicate') throw new DomainError('MESSAGE_DUPLICATE_CONFLICT');
+    if (!reservation.acquired) throw new DomainError('MESSAGE_PENDING');
+
+    let extractionAttempted = false;
+    let completingMessage = false;
+    try {
+      return await withMcp(res.locals.owner,async client=>{
+        const listed = await client.listTools();
+        const proposal = listed.tools.find(tool=>tool.name==='propose_facts');
+        const candidatesSchema = proposal?.inputSchema.properties?.candidates;
+        if (!candidatesSchema) throw new DomainError('MCP_SCHEMA_UNAVAILABLE');
+        extractionAttempted = true;
+        const candidates = await extractCandidates(args.text,candidatesSchema,{key:process.env.GROQ_API_KEY,model,
+          beforeProviderRequest:()=>{
+            const used=reviewProviderRequestBudget.beforeRequest();
+            if (reviewProviderRequestLimit!==undefined) console.log(`Provider review request ${used}/${reviewProviderRequestLimit}`);
+          }});
+        completingMessage = true;
+        await call<Case>(client,'complete_message',{caseId,expectedRevision:args.expectedRevision,
+          idempotencyKey:args.idempotencyKey,sourceText:args.text,attemptToken:reservation.attemptToken,candidates});
+        completingMessage = false;
+        return call<Case>(client,'get_case',{caseId});
+      });
+    } catch (error) {
+      if (!extractionAttempted || getExtractionOutcome(error)==='not-started') {
+        store.releaseMessage(res.locals.owner,caseId,args.expectedRevision,args.idempotencyKey,args.text,
+          reservation.attemptToken,'not-started');
+        throw error;
+      }
+      if (completingMessage && error instanceof DomainError &&
+          (error.code==='UNSUPPORTED_FACT' || error.code==='UNSUPPORTED_EVIDENCE')) {
+        throw error;
+      }
+      throw new DomainError('MESSAGE_PENDING');
     }
-    const existing = await call<Case>(client,'get_case',{caseId});
-    if (existing.revision!==args.expectedRevision) throw new DomainError('STALE_REVISION');
-    const listed = await client.listTools();
-    const proposal = listed.tools.find(tool=>tool.name==='propose_facts');
-    const candidatesSchema = proposal?.inputSchema.properties?.candidates;
-    if (!candidatesSchema) throw new DomainError('MCP_SCHEMA_UNAVAILABLE');
-    const candidates = await extractCandidates(args.text,candidatesSchema,{key:process.env.GROQ_API_KEY,model});
-    await call<Case>(client,'propose_facts',{caseId,expectedRevision:args.expectedRevision,
-      idempotencyKey:args.idempotencyKey,sourceText:args.text,candidates});
-    return call<Case>(client,'get_case',{caseId});
-  });
-  res.json(state(packet));
+  })();
+  task.catch(()=>{});
+  messageInflight.set(inflightKey,{fingerprint,promise:task});
+  try {
+    const packet = await task;
+    res.json(state(packet,res.locals.owner));
+  } finally {
+    if (messageInflight.get(inflightKey)?.promise===task) messageInflight.delete(inflightKey);
+  }
 });
 app.post('/api/cases/:caseId/correct',async(req,res)=>{
   const caseId = uuid.parse(req.params.caseId);
@@ -184,7 +249,7 @@ app.post('/api/cases/:caseId/correct',async(req,res)=>{
     await call<Case>(client,'correct_fact',{caseId,...args});
     return call<Case>(client,'get_case',{caseId});
   });
-  res.json(state(packet));
+  res.json(state(packet,res.locals.owner));
 });
 app.post('/api/cases/:caseId/confirm',async(req,res)=>{
   const caseId = uuid.parse(req.params.caseId);
@@ -197,7 +262,7 @@ app.post('/api/cases/:caseId/confirm',async(req,res)=>{
         caseId,expectedRevision:args.expectedRevision,idempotencyKey:args.idempotencyKey});
       return call<Case>(client,'get_case',{caseId});
     },approval);
-    res.json(state(packet));
+    res.json(state(packet,res.locals.owner));
   } finally {approvals.delete(approval);}
 });
 app.post('/api/cases/:caseId/export',async(req,res)=>{
@@ -205,7 +270,7 @@ app.post('/api/cases/:caseId/export',async(req,res)=>{
   const args = mutation.strict().parse(req.body);
   const exported = await withMcp(res.locals.owner,client=>call<Record<string,unknown>>(client,'prepare_export',{caseId,...args}));
   const packet = await withMcp(res.locals.owner,client=>call<Case>(client,'get_case',{caseId}));
-  res.json({...state(packet),export:exported});
+  res.json({...state(packet,res.locals.owner),export:exported});
 });
 app.get('/api/cases/:caseId/exports/:exportId/:form',async(req,res)=>{
   const caseId = uuid.parse(req.params.caseId), exportId = uuid.parse(req.params.exportId);
@@ -218,9 +283,17 @@ app.get('/api/cases/:caseId/exports/:exportId/:form',async(req,res)=>{
 });
 app.use(express.static(fileURLToPath(new URL('../dist/frontend/',import.meta.url)),{dotfiles:'deny'}));
 app.use((error:unknown,_req:Request,res:Response,_next:NextFunction)=>{
+  void _next;
   const code = error instanceof DomainError?error.code:error instanceof z.ZodError?'INVALID_INPUT':'INTERNAL_ERROR';
-  const status = /STALE|CONFLICT/.test(code)?409:/NOT_FOUND/.test(code)?404:/PROVIDER|GROQ/.test(code)?503:code==='INTERNAL_ERROR'?500:400;
-  res.status(status).json({error:code});
+  const status = code==='REVIEW_PROVIDER_LIMIT'?429:/STALE|CONFLICT|PENDING/.test(code)?409:/NOT_FOUND/.test(code)?404:/PROVIDER|GROQ/.test(code)?503:code==='INTERNAL_ERROR'?500:400;
+  const message = code==='REVIEW_PROVIDER_LIMIT'
+    ? 'Three-request review limit reached. This message was not sent; manual correction remains available.'
+    : code==='UNSUPPORTED_FACT'
+    ? 'That fact was not clearly supported by your message. Please restate the detail you want included.'
+    : code==='UNSUPPORTED_EVIDENCE'
+      ? 'The supporting words could not be matched to your message. Please restate the detail exactly.'
+      : undefined;
+  res.status(status).json(message ? {error:code,message} : {error:code});
 });
 const http = app.listen(port,'127.0.0.1',()=>console.log(`PaperPath listening at ${base}`));
 process.on('SIGTERM',()=>http.close(()=>{store.close();process.exit(0);}));
